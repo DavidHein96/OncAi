@@ -1,0 +1,6 @@
+remote_path: oncai_data/remote
+lake_path: oncai_data/lake
+inbox_path: oncai_data/inbox
+db_path: oncai_data/oncai.duckdb
+remote_type: local
+llm_backends: {}

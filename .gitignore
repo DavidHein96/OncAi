@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+*.csv
+*.parquet
+*.jsonl
+
+.env
+.DS_Store
+*.ipynb
+*.duckdb
+*.xlsx
+*.sha256
+*.zip
+*.bak
+.vscode/
+*.log
+
+*_manifest.json
+oncai.yaml
