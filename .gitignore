@@ -44,6 +44,7 @@ site/
 
 # Data files
 *.csv
+!tests/fixtures/sample_pathology.csv
 *.parquet
 *.jsonl
 *.duckdb

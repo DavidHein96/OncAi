@@ -1,0 +1,11 @@
+report_id,row_id,mrn,external_name,mult_ln_val_storage,ordering_date
+KP-001,1,M0001,results,"DIAGNOSIS: Renal cell carcinoma, clear cell type, Fuhrman/ISUP grade 2. Tumor 4.5 cm, confined to kidney (pT1b). Margins negative.",2024-03-15
+KP-001,2,M0001,results,"IMMUNOHISTOCHEMISTRY: Tumor cells positive for CD10, PAX8, CAIX, and vimentin. Negative for CK7. Findings support clear cell renal cell carcinoma.",2024-03-15
+KP-001,3,M0001,gross,"GROSS: Received fresh, left radical nephrectomy specimen weighing 320 g.",2024-03-15
+KP-002,1,M0002,results,"SPECIMEN A (Left radical nephrectomy): Renal cell carcinoma, clear cell type, ISUP grade 3. Tumor 7.8 cm. Renal vein involved (pT3a). Margins negative.",2024-03-22
+KP-002,2,M0002,results,"SPECIMEN B (Hilar lymph node, biopsy): Metastatic renal cell carcinoma, clear cell type, 1 of 3 nodes involved (pN1).",2024-03-22
+KP-002,3,M0002,results,"SPECIMEN C (Ipsilateral adrenal gland, en-bloc resection): Benign adrenal cortex; no tumor involvement.",2024-03-22
+KP-002,4,M0002,results,"IMMUNOHISTOCHEMISTRY (Specimen B): Tumor cells positive for PAX8 and CD10, confirming renal origin of metastasis.",2024-03-22
+KP-003,1,M0003,results,"SPECIMEN A (Right kidney, partial nephrectomy): Chromophobe renal cell carcinoma, 3.2 cm, margins negative (pT1a).",2024-04-02
+KP-003,2,M0003,results,"SPECIMEN B (Left kidney mass, core biopsy): Renal oncocytoma, no features of malignancy identified.",2024-04-02
+KP-003,3,M0003,results,"IMMUNOHISTOCHEMISTRY: Specimen A positive for CK7 and CD117, negative for vimentin (supports chromophobe RCC). Specimen B CD117 positive, CK7 negative, vimentin negative (supports oncocytoma).",2024-04-02
