@@ -1,6 +1,7 @@
+# remote_path is a plain filesystem path. For SFTP/cloud storage, mount it
+# locally (sshfs, rclone, Box Drive) and point remote_path at the mount.
 remote_path: oncai_data/remote
 lake_path: oncai_data/lake
 inbox_path: oncai_data/inbox
 db_path: oncai_data/oncai.duckdb
-remote_type: local
 llm_backends: {}

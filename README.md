@@ -1,3 +1,7 @@
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Use uv](https://img.shields.io/badge/recommended%20installer-uv-4584b6.svg)](https://docs.astral.sh/uv/)
+
 # OncAI — Oncology Data Lake + Single-Note FC Extraction
 
 A small data-lake + LLM-extraction toolkit for pathology reports. Ingests raw CSVs into a versioned parquet lake, builds a queryable DuckDB, and runs **single-note function-calling extraction** against each report — the model calls Pydantic-validated tools to record structured findings.
@@ -62,6 +66,21 @@ Remote (Box / shared drive)    Lake (local parquet)         DuckDB (queryable)
 **Data flow:** Remote → `pull` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL → `ingest fc_extractions` → Lake → `push` → Remote.
 
 **Why a lake + DuckDB:** the parquet lake is the source of truth (versioned, content-hashed merges). DuckDB is rebuilt from the lake on demand — no migrations, no schema drift between extractions and source data.
+
+### Remote storage
+
+`remote_path` is just a **filesystem path** — `pull`/`push` copy files with ordinary filesystem operations. There is intentionally no built-in SFTP/cloud client. To use remote storage (SFTP, S3, Box, a network share), **mount it as a local directory** and point `remote_path` at the mount:
+
+```bash
+# SFTP via sshfs
+sshfs user@host:/data/oncai  /mnt/oncai-remote
+oncai init --remote /mnt/oncai-remote
+
+# …or rclone (SFTP, S3, Google Drive, Box, etc.)
+rclone mount myremote:oncai  /mnt/oncai-remote --vfs-cache-mode writes
+```
+
+This keeps oncai transport-agnostic: the OS handles the network, oncai handles the data. See [docs/design.md](docs/design.md#remote-storage-is-just-a-filesystem-path) for the rationale.
 
 ## CLI Reference
 

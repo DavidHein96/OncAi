@@ -52,7 +52,11 @@ class OncaiConfig(BaseModel):
 
     remote_path: Path = Field(
         default=Path("oncai_data/remote"),
-        description="Path to remote data (mounted drive or local test folder)",
+        description=(
+            "Path to remote data. This is a plain filesystem path — for "
+            "SFTP/cloud storage, mount it locally (sshfs, rclone, Box Drive) "
+            "and point this at the mount. See docs/design.md."
+        ),
     )
     lake_path: Path = Field(
         default=Path("oncai_data/lake"),
@@ -66,14 +70,6 @@ class OncaiConfig(BaseModel):
         default=Path("oncai_data/oncai.duckdb"),
         description="Path to DuckDB database",
     )
-    remote_type: Literal["local", "sftp"] = Field(
-        default="local",
-        description="Remote storage type",
-    )
-    sftp_host: str | None = None
-    sftp_user: str | None = None
-    sftp_key_path: Path | None = None
-
     llm_backends: dict[str, LLMBackendConfig] = Field(
         default_factory=dict,
         description="Named LLM backend configurations",

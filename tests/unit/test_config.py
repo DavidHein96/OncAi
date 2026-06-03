@@ -14,7 +14,6 @@ class TestOncaiConfig:
         assert config.inbox_path == Path("oncai_data/inbox")
         assert config.remote_path == Path("oncai_data/remote")
         assert config.db_path == Path("oncai_data/oncai.duckdb")
-        assert config.remote_type == "local"
 
     def test_custom_paths(self):
         config = OncaiConfig(

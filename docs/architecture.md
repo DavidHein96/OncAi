@@ -15,6 +15,8 @@ Raw CSVs ──→ Inbox ──→ Lake (Parquet) ──→ DuckDB
 
 A user-facing batch goes through five steps: `pull` → `ingest` → `build-db` → `fc run-single` → `ingest fc_extractions` (to land the JSONL back in the lake) → `push` (to share with the team).
 
+`pull`/`push` treat `remote_path` as a plain filesystem path — there is no built-in SFTP/cloud client. For remote storage, mount it locally (sshfs, rclone, Box Drive) and point `remote_path` at the mount. See [design.md](design.md#remote-storage-is-just-a-filesystem-path) for why.
+
 ## Layers
 
 ### 1. Ingest layer

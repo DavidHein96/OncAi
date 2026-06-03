@@ -42,6 +42,19 @@ This toolkit deliberately targets the **one-report-in / one-record-out** case (p
 
 No Postgres, no data warehouse, no cloud services. One DuckDB file holds the entire queryable dataset. It reads directly from Parquet, supports full SQL, and runs on a laptop. Clinical data projects are typically small enough (thousands to low millions of rows) that this is more than sufficient, and the operational simplicity is worth it.
 
+## Remote Storage Is Just a Filesystem Path
+
+`remote_path` is a plain directory. `pull`/`push` (`lake.py`) move data with ordinary filesystem operations — `shutil.copy2`, `Path.glob`, `Path.exists()`. There is **no built-in SFTP, S3, or cloud client**, and that is a deliberate decision rather than a missing feature.
+
+We considered adding a native SFTP transport (the config once carried `remote_type` / `sftp_*` stubs) and chose not to, for several reasons:
+
+- **The OS already solved it.** `sshfs`, `rclone mount`, Box Drive, and SMB/NFS all expose remote storage as a local directory. Pointing `remote_path` at such a mount gives you SFTP/S3/cloud sync with **zero** transport code in oncai — the existing `copy2`/`glob` path just works.
+- **Even the "SFTP is the only sanctioned transport" case is covered.** Hospital/clinical environments that mandate SFTP can use `rclone mount sftp:…` (userspace, cross-platform, no admin) and still point oncai at the mount. Mounting locks no one out.
+- **Native SFTP is a subsystem, not a flag.** Doing it properly means abstracting *every* path operation (exists, glob, copy, sidecar read/write, atomic writes) behind a virtual-filesystem interface, then taking on a heavyweight SSH dependency, host-key verification, auth, retries, and partial-transfer handling. That is a large, security-sensitive surface to maintain in a project whose value is the data model, not the transport.
+- **Dead config is a trap.** A `remote_type: sftp` switch that silently falls back to local behavior generates "I configured SFTP and nothing happened" confusion. Better to have no switch than a switch that lies.
+
+The filesystem-path boundary is the right extension point: if a real requirement ever demands in-process SFTP, it can be added behind a transport interface at that point, driven by a concrete use case. Building it speculatively buys nothing the OS doesn't already provide.
+
 ## Definitions as Configuration
 
 Extraction behavior is defined by Pydantic models + system prompts, not application code. Adding a new extraction target means:
