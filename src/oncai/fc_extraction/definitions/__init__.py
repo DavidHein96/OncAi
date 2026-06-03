@@ -14,6 +14,6 @@ Import from each submodule directly, e.g.:
     from oncai.fc_extraction.definitions.path_kidney_basic import (
         DEFINITION_NAME,
         SYSTEM_PROMPT,
-        create_kidney_path_basic_registry,
+        create_path_kidney_basic_registry,
     )
 """

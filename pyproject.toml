@@ -5,9 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "oncai"
 version = "0.1.0"
-description = "Add your description here"
+description = "Oncology data lake and single-note LLM extraction toolkit"
 readme = "README.md"
-requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "David Hein", email = "davidhein67@gmail.com" }]
+maintainers = [{ name = "David Hein" }]
+requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.0.0",
     "fastparquet>=2025.12.0",
@@ -45,10 +49,8 @@ line-length = 88
 indent-width = 4
 
 extend-exclude = [
-    "archive",
     "*.ipynb",
     "tests",
-    "tools",
 ]
 
 [tool.ruff.lint]
@@ -130,9 +132,7 @@ ignore = [
     "RUF005",
     "RUF046",
     "RUF100",
-    "S306",
-    "S311",   # Synthetic/fuzz generation uses deterministic pseudo-randomness
-    "S701",   # Fuzz templates render plain text, not HTML
+    "S311",   # random.uniform is used for retry-backoff jitter, not crypto
     "SIM102",
     "SIM110",
     "UP017",
@@ -151,8 +151,6 @@ max-bool-expr = 5
 
 
 [tool.ruff.lint.per-file-ignores]
-# "src/fastanon/runtime_deps.py" = ["PLC0415"]
-# "src/fastanon/fuzz/mlflow_log.py" = ["PLC0415", "PLR0913"]
 # Test files use asserts (S101) and /tmp/ literals (S108) intentionally;
 # neither is a real concern in test contexts.
 "tests/**/*.py" = ["S101", "S108"]

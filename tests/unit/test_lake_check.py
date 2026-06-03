@@ -66,9 +66,7 @@ def test_corrupt_parquet_silently_skipped_by_other_checks(lake_path):
 
     Only ``check_parquet_readable`` surfaces the failure; every other check_*
     helper continues past the broken file without emitting a CheckResult for
-    it. The TODOs in lake_check.py track whether to keep this duplicate-skip
-    pattern or report the unreadable file from each check. If the policy
-    changes, update this test alongside it.
+    it. If that policy changes, update this test alongside the implementation.
     """
     bad_file = lake_path / "pathology" / "pathology.parquet"
     bad_file.write_bytes(b"this is not a parquet file")

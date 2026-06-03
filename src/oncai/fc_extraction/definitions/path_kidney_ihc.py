@@ -12,7 +12,6 @@ The model calls record_ihc_result N times (once per marker).
 Used with batch_single.py for single-note processing.
 """
 
-# TODO: CLEAN UP CODE AND UPDATE DOC STRINGS
 from __future__ import annotations
 
 import logging
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-DEFINITION_NAME = "IhcAdvancedExtraction"
+DEFINITION_NAME = "PathKidneyIhc"
 
 
 # -----------------------
@@ -390,7 +389,7 @@ use those.
 # =============================================================================
 
 
-def create_ihc_advanced_registry() -> ToolRegistry:
+def create_path_kidney_ihc_registry() -> ToolRegistry:
     """Create and configure the tool registry for IHC extraction.
 
     NOTE: ledger_fields are set for forward-compatibility but have no effect

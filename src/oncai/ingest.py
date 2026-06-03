@@ -30,8 +30,9 @@ from oncai.config import (
     OncaiConfig,
 )
 from oncai.lake import merge_dataframes
+from oncai.schemas.pathology import PATHOLOGY_SCHEMA
 from oncai.sidecar import ensure_sidecar
-from oncai.transforms import collate_pathology
+from oncai.transforms import collate_pathology, passthrough_transform
 
 # --- result types ---------------------------------------------------------
 
@@ -256,9 +257,10 @@ def _replay_single_output(
 
 
 def _transform_pathology(path: Path) -> tuple[pl.DataFrame, list[str]]:
-    """Pathology: rename common Epic columns, infer row_id if missing, collate.
+    """Pathology: rename common Epic columns, then either collate multi-line
+    reports or pass already-clean ones through untouched.
 
-    Returns the collated DataFrame plus a list of human-readable notes
+    Returns the transformed DataFrame plus a list of human-readable notes
     describing any renames or inferences applied — these are surfaced via
     ``FolderResult.notes`` so the user sees exactly what ingest did to
     their input (and can rename the columns upstream if they prefer).
@@ -278,6 +280,17 @@ def _transform_pathology(path: Path) -> tuple[pl.DataFrame, list[str]]:
         cols = lf.collect_schema().names()
         for old, new in renames.items():
             notes.append(f"{path.name}: renamed column '{old}' → '{new}'")
+
+    # Already-clean reports: one row per report with a ``report_text`` column
+    # and no multi-line ``mult_ln_val_storage`` to collate. Pass them through
+    # untouched — schema validation + hashes only, no collation or text
+    # cleaning — so reports that are already ready to go are not rewritten.
+    if "report_text" in cols and "mult_ln_val_storage" not in cols:
+        notes.append(
+            f"{path.name}: report_text present and no mult_ln_val_storage — "
+            "treating reports as already clean (skipping collation)"
+        )
+        return passthrough_transform(lf, PATHOLOGY_SCHEMA).collect(), notes  # type: ignore[return-value]
 
     if "row_id" not in cols:
         # Non-interactive ingest — we trust the user's CSV is in

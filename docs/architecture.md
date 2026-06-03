@@ -13,13 +13,13 @@ Raw CSVs ──→ Inbox ──→ Lake (Parquet) ──→ DuckDB
                                   └── JSONL ──→ ingest ──→ Lake
 ```
 
-A user-facing batch goes through five steps: `sync` → `ingest` → `build-db` → `fc run-single` → `ingest fc_extractions` (to land the JSONL back in the lake) → `push` (to share with the team).
+A user-facing batch goes through five steps: `pull` → `ingest` → `build-db` → `fc run-single` → `ingest fc_extractions` (to land the JSONL back in the lake) → `push` (to share with the team).
 
 ## Layers
 
 ### 1. Ingest layer
 
-**Commands**: `sync`, `ingest`, `build-db`
+**Commands**: `pull`, `ingest`, `build-db`
 
 Inbox CSVs are replayed into a versioned parquet lake. Each folder has a fixed ingest mode declared in `config.FOLDER_MODES`:
 
@@ -31,7 +31,7 @@ Inbox CSVs are replayed into a versioned parquet lake. Each folder has a fixed i
 | LAKE_ONLY | `runs` | No inbox path; populated by `fc run-single` writes. |
 
 Per-folder transforms live in `transforms/`:
-- **Pathology collation** (`transforms/collate.py`) — multi-line CSV reports are reassembled into one row per `report_id`. Text is cleaned (unicode normalization, boilerplate removal, line-ending standardization). Each row gets `key_hash` (Blake2b of identity cols) and `content_hash` (Blake2b of content cols) so subsequent re-ingests are incremental.
+- **Pathology collation** (`transforms/collate.py`) — multi-line CSV reports are reassembled into one row per `report_id`, then generic text cleaning is applied (Unicode normalization, whitespace and line-ending standardization). Two cleaning steps are opt-in and off by default, since they encode source-specific assumptions: site-specific boilerplate stripping (`PATHOLOGY_BOILERPLATE_PATTERNS`, ships empty) and decoding double-spaces back into line breaks (`DECODE_DOUBLE_SPACE_LINEBREAKS`). Reports that are already one-row-per-report (a `report_text` column and no `mult_ln_val_storage`) are auto-detected and passed through untouched — hashes only, no collation or cleaning. Each row gets `key_hash` (Blake2b of identity cols) and `content_hash` (Blake2b of content cols) so subsequent re-ingests are incremental.
 - **Passthrough** (`transforms/passthrough.py`) — identity transform with schema validation; not currently used by shipped folders but available for callers that just need column-type enforcement.
 
 `build-db` reads all lake parquets into a single DuckDB file organized by schema. Optionally per-folder `<batch>.sql` transforms run after the base load so each curated batch can declare its own derived tables.
@@ -86,7 +86,7 @@ Both ingest and extraction are incremental:
 ```
 src/oncai/
 ├── cli/                    # Typer CLI
-│   ├── main_cmds.py        # init, sync, push, ingest, build-db, status, schemas, version
+│   ├── main_cmds.py        # init, pull, push, ingest, build-db, status, schemas, version
 │   ├── fc_cmds.py          # fc run-single, list, status, stage, unstage, manifest
 │   ├── cohort_cmds.py      # cohort add, list, info, remove
 │   ├── runs_cmds.py        # runs list, show, compare

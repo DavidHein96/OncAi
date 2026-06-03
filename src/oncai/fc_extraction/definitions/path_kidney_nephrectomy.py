@@ -26,8 +26,7 @@ from ..tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-DEFINITION_NAME = "NephrectomySimple"
-# TODO: CLEAN UP CODE AND UPDATE DOC STRINGS
+DEFINITION_NAME = "PathKidneyNephrectomy"
 
 # =============================================================================
 # Enums
@@ -701,7 +700,7 @@ Routine "not specified" cases do NOT warrant a flag.
 # =============================================================================
 
 
-def create_kidney_path_nephrectomy_registry() -> ToolRegistry:
+def create_path_kidney_nephrectomy_registry() -> ToolRegistry:
     """Create tool registry for primary kidney nephrectomy pathology extraction.
 
     All tools are registered together. The plan tool runs first to commit to

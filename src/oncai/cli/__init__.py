@@ -22,7 +22,7 @@ app.add_typer(cohort_app, name="cohort")
 app.add_typer(runs_app, name="runs")
 app.add_typer(db_app, name="db")
 
-# Register main commands (init, sync, push, ingest, build-db, status, schemas, version)
+# Register main commands (init, pull, push, ingest, build-db, status, schemas, version)
 register_main_commands(app)
 
 

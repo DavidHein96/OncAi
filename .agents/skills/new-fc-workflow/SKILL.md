@@ -7,7 +7,7 @@ allowed-tools: Bash, Read, Write, Edit, Grep
 # Add a new FC extraction workflow
 
 A workflow = a Pydantic-models + system-prompt definition module + a one-line
-registration in `cli/fc_cmds.py:_DEFINITIONS`. Background: see `CLAUDE.md`
+registration in `cli/fc_cmds.py:_DEFINITIONS`. Background: see `AGENTS.md`
 and `src/oncai/fc_extraction/definitions/example.py`.
 
 ## Before you start

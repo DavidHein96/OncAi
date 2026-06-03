@@ -1,4 +1,4 @@
-"""Main CLI commands: init, sync, push, ingest, build-db, status, schemas, version."""
+"""Main CLI commands: init, pull, push, ingest, build-db, status, schemas, version."""
 
 from __future__ import annotations
 
@@ -322,19 +322,19 @@ def init(
     console.print("  Config: oncai.yaml")
 
 
-def sync(
+def pull(
     folder: list[str] | None = typer.Argument(
         None,
-        help="Folders to sync (default: all). E.g. pathology fc_extractions",
+        help="Folders to pull (default: all). E.g. pathology fc_extractions",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be copied without copying"
     ),
 ):
-    """Sync remote → local: lake parquets and inbox files (with sidecars)."""
+    """Pull remote → local: lake parquets and inbox files (with sidecars)."""
     config = get_config()
     _run_transfer(
-        action="Syncing",
+        action="Pulling",
         src=config.remote_path,
         dst=config.lake_path,
         fn=lambda: sync_remote_to_lake(
@@ -503,7 +503,7 @@ def register_main_commands(app: typer.Typer) -> None:
     importable + testable; this is just the wiring step.
     """
     app.command()(init)
-    app.command()(sync)
+    app.command()(pull)
     app.command()(push)
     app.command()(ingest)
     app.command(name="build-db")(build_db)

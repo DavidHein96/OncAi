@@ -37,62 +37,27 @@ def normalize_date(value: str | date | None) -> date | None:
         return None
 
 
-# Regex patterns to remove boilerplate from pathology reports
-PATHOLOGY_BOILERPLATE_PATTERNS = [
-    re.compile(
-        r"Stain quality is acceptable\. The microscopic findings are reflected in the diagnosis rendered\."
-    ),
-    re.compile(
-        r"The patient's name, specimen container\(s\) and cassettes all match\."
-    ),
-    re.compile(
-        r"I,.*the senior physician, attest that I: \(i\) attended the biopsy procedure; \(ii\) immediately examined smears while the procedure was underway; and \(iii\) determined or confirmed the adequacy of the specimen\(s\)\."
-    ),
-    re.compile(
-        r"I provided appropriate supervision to.*As the senior physician, I attest.* that.*I: \(i\) examined the relevant preparation\(s\) for the specimen\(s\); and \(ii\) rendered or confirmed the diagnosis\(es\)\."
-    ),
-    re.compile(
-        r"The case was reviewed and discussed at.*conference on.* and the above interpretation represents a consensus opinion"
-    ),
-    re.compile(r"This case was reviewed with.* who concurs with the above impression"),
-    re.compile(
-        r"The case was reviewed in the.* The final diagnosis represents the opinion of the group\."
-    ),
-    re.compile(
-        r"The case was reviewed and discussed at genitourinary pathology consensus conference on .*\."
-    ),
-    re.compile(
-        r"Biopsy performed by.* at William P\. Clements Jr\. University Hospital on \d+/\d+/\d\d+"
-    ),
-    re.compile(
-        r"Biopsy performed by.* at Clements Jr\. University Hospital on \d+/\d+/\d\d+"
-    ),
-    re.compile(r"Dr\. .*reviewed and concurred\."),
-    re.compile(
-        r"I,.* examined the preparations and rendered the diagnosis. I provided supervision to .* Reported findings to"
-    ),
-    re.compile(r"Time to fixation: <1 hour"),
-    re.compile(r"Duration of fixation in formalin: Between 6 and 72 hours"),
-    re.compile(
-        r"Adequacy reported to Dr.*on \d+/\d+/\d\d+ at \d+:?\d\d[AaPp ]?[AaPpmM]?[mM]?"
-    ),
-    re.compile(r"Immediate on-site adequacy assessment was performed by:[ \w\.]*"),
-    re.compile(r"\w+ \w+, MS, PA\(ASCP\)"),
-    re.compile(r"PA\(ASCP\)"),
-    re.compile(r"\d\d\d-\d\d\d-\d\d\d\d"),
-    re.compile(r"\.--"),
-    re.compile(
-        r"Selective slides for grading are reviewed in consultation with.*who concurs\."
-    ),
-    re.compile(r"BAP1 loss \(BRCA1 associated protein-1\).*24382589"),
-    re.compile(r"The microscopic findings are reflected in the diagnosis rendered"),
-    re.compile(r"Received at the request of .* received for outside consultation"),
-    re.compile(r"serially sectioned, entirely submitted"),
-    re.compile(r"serially sectioned and entirely submitted"),
-    re.compile(r"The case is reviewed at.*conference on \d+/\d+/\d\d+\."),
-    re.compile(r"This case was reviewed with.*\."),
-    re.compile(r"FDA Disclaimer:.*CAP eCC January 2018 Annual Release"),
-]
+# Site-specific boilerplate to strip from report text, applied by
+# ``clean_pathology_text`` after generic cleaning. Empty by default: report
+# templates are institution-specific (attestations, conference language, lab
+# disclaimers, etc.), so this ships with no patterns rather than forcing one
+# site's wording on every corpus — and an over-broad pattern can silently
+# delete real diagnostic content.
+#
+# To strip your own boilerplate, add compiled regexes here; each match is
+# removed from the report text. For example:
+#     PATHOLOGY_BOILERPLATE_PATTERNS = [
+#         re.compile(r"Stain quality is acceptable\."),
+#     ]
+PATHOLOGY_BOILERPLATE_PATTERNS: list[re.Pattern[str]] = []
+
+# Some source exports encode intra-report line breaks as double spaces (a side
+# effect of how multi-line CSV cells are stored), so ``clean_pathology_text``
+# can decode "  " back into newlines. OFF by default: in ordinary prose a
+# double space is just a sentence separator, and decoding it would shred the
+# text into one line per sentence. Set True only if your source actually uses
+# the double-space line-break encoding.
+DECODE_DOUBLE_SPACE_LINEBREAKS = False
 
 # External names to skip (these are section headers, not content)
 SKIP_EXTERNAL_NAMES = {
@@ -172,8 +137,9 @@ def clean_pathology_text(text: str) -> str:
     for pattern in PATHOLOGY_BOILERPLATE_PATTERNS:
         text = pattern.sub("", text)
 
-    # Convert double spaces to newlines (this is how line breaks are encoded)
-    text = re.sub(r"  ", "\n", text)
+    # Optionally decode double-space-encoded line breaks back into newlines.
+    if DECODE_DOUBLE_SPACE_LINEBREAKS:
+        text = re.sub(r"  ", "\n", text)
 
     # Clean up multiple newlines
     text = re.sub(r"\n{3,}", "\n\n", text)

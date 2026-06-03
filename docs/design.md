@@ -13,7 +13,7 @@ Every row gets two hashes:
 - **key_hash** (Blake2b-128) — computed from identity columns (e.g., `report_id`). Determines if a row already exists.
 - **content_hash** — computed from value columns (e.g., `report_text`). Determines if an existing row has changed.
 
-This makes re-ingestion safe and cheap — only genuinely new or changed rows are written. No timestamps, no "last modified" tracking, no coordination with the source system. After ingestion, source files are archived to `inbox/archive/` so they are never re-processed, eliminating redundant work on re-runs.
+This makes re-ingestion safe and cheap — only genuinely new or changed rows are written. No timestamps, no "last modified" tracking, no coordination with the source system. The inbox is the permanent source of truth: every ingest replays it from scratch, and because the content-hash merge turns unchanged rows into no-ops, re-running is idempotent rather than redundant — there's no archive step to manage.
 
 ## JSONL as LLM Output Format
 

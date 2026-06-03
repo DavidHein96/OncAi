@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-Orientation for Claude (and other LLM agents) working in this repo. If you're
+Orientation for Codex (and other LLM agents) working in this repo. If you're
 reading this in a conversation, you're most likely here to **add a new
 function-calling extraction workflow** — that's the primary contribution
 shape. Everything else (lake, ingest, DuckDB plumbing) is the supporting cast.
@@ -35,7 +35,7 @@ The shipped example: `src/oncai/fc_extraction/definitions/example.py`.
 
 ## Adding a new FC workflow
 
-Use the `/new-fc-workflow` slash skill (in `.claude/skills/new-fc-workflow/`).
+Use the `/new-fc-workflow` slash skill (in `.Codex/skills/new-fc-workflow/`).
 It walks through copy → edit → register and verifies with `oncai fc list`.
 
 Don't invent your own scaffolding flow when the user asks "add a new

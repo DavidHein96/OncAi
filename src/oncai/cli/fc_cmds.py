@@ -69,35 +69,54 @@ _DEFINITIONS: dict[str, tuple[str, str]] = {
     ),
     "path_kidney_basic": (
         "oncai.fc_extraction.definitions.path_kidney_basic",
-        "create_kidney_path_basic_registry",
+        "create_path_kidney_basic_registry",
     ),
     "path_kidney_ihc": (
         "oncai.fc_extraction.definitions.path_kidney_ihc",
-        "create_ihc_advanced_registry",
+        "create_path_kidney_ihc_registry",
     ),
     "path_kidney_nephrectomy": (
         "oncai.fc_extraction.definitions.path_kidney_nephrectomy",
-        "create_kidney_path_nephrectomy_registry",
+        "create_path_kidney_nephrectomy_registry",
     ),
     "path_kidney_proc_site_hist": (
         "oncai.fc_extraction.definitions.path_kidney_proc_site_hist",
-        "create_path_procedure_site_hist_registry",
+        "create_path_kidney_proc_site_hist_registry",
     ),
 }
+
+
+def _resolve_definition_name(name: str) -> str | None:
+    """Resolve a user-supplied definition identifier to a registered key.
+
+    Accepts either the registered snake_case key (e.g. ``path_kidney_basic``)
+    or the module's PascalCase ``DEFINITION_NAME`` (e.g. ``PathKidneyBasic``).
+    Returns the snake_case key, or ``None`` if nothing matches. The
+    PascalCase scan only runs when the direct key lookup misses, so the
+    common case avoids importing every definition module.
+    """
+    if name in _DEFINITIONS:
+        return name
+    for key, (module_path, _factory) in _DEFINITIONS.items():
+        module = importlib.import_module(module_path)
+        if getattr(module, "DEFINITION_NAME", None) == name:
+            return key
+    return None
 
 
 def _load_definition(name: str):
     """Resolve ``name`` to ``(note_config, registry)``."""
     from oncai.fc_extraction.batch_single import SingleNoteConfig
 
-    if name not in _DEFINITIONS:
+    resolved = _resolve_definition_name(name)
+    if resolved is None:
         console.print(f"[red]Unknown definition: {name}[/red]")
         console.print(
             "Available definitions: " + ", ".join(sorted(_DEFINITIONS.keys()))
         )
         raise typer.Exit(1)
 
-    module_path, factory_name = _DEFINITIONS[name]
+    module_path, factory_name = _DEFINITIONS[resolved]
     module = importlib.import_module(module_path)
     registry = getattr(module, factory_name)()
     note_config = SingleNoteConfig(
@@ -1259,8 +1278,8 @@ def fc_manifest(
     producing a batch of extractions.
 
     Examples:
-        oncai fc manifest fc_outputs/KidneyPathBasic/v1_manifest.json
-        oncai fc manifest fc_outputs/KidneyPathBasic/v1.jsonl
+        oncai fc manifest fc_outputs/PathKidneyBasic/v1_manifest.json
+        oncai fc manifest fc_outputs/PathKidneyBasic/v1.jsonl
     """
     from rich.panel import Panel
     from rich.syntax import Syntax
@@ -1327,7 +1346,7 @@ def fc_stage(
     tables with ``oncai fc unstage --all``.
 
     Examples:
-        oncai fc stage fc_outputs/KidneyPathBasic/path_basic_v3.jsonl
+        oncai fc stage fc_outputs/PathKidneyBasic/path_basic_v3.jsonl
             → extractions_staging.path_basic_v3
     """
     import tempfile

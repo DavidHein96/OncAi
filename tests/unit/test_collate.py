@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import polars as pl
 
+from oncai.transforms import collate as collate_mod
 from oncai.transforms.collate import (
+    PATHOLOGY_BOILERPLATE_PATTERNS,
     clean_pathology_text,
     clean_text,
     collate_pathology,
@@ -70,14 +73,42 @@ class TestCleanText:
 
 
 class TestCleanPathologyText:
-    def test_boilerplate_removal(self):
-        boilerplate = "Stain quality is acceptable. The microscopic findings are reflected in the diagnosis rendered."
-        text = f"DIAGNOSIS: Clear cell RCC.  {boilerplate}  Margins negative."
+    def test_no_default_boilerplate_removal(self):
+        # Ships with no site-specific patterns, so report content is preserved
+        # verbatim — only generic cleaning applies.
+        assert PATHOLOGY_BOILERPLATE_PATTERNS == []
+        text = "DIAGNOSIS: Clear cell RCC. Stain quality is acceptable. Margins negative."
         result = clean_pathology_text(text)
+        assert "Clear cell RCC" in result
+        assert "Stain quality is acceptable" in result
+        assert "Margins negative" in result
+
+    def test_boilerplate_hook_strips_registered_patterns(self, monkeypatch):
+        # Users opt in by registering their own site patterns on the hook;
+        # clean_pathology_text reads the module global at call time.
+        monkeypatch.setattr(
+            collate_mod,
+            "PATHOLOGY_BOILERPLATE_PATTERNS",
+            [re.compile(r"Stain quality is acceptable\.")],
+        )
+        text = "DIAGNOSIS: Clear cell RCC. Stain quality is acceptable. Margins negative."
+        result = collate_mod.clean_pathology_text(text)
         assert "Stain quality is acceptable" not in result
         assert "Clear cell RCC" in result
         assert "Margins negative" in result
-        # double-space → newline conversion
+
+    def test_double_space_linebreak_decoding_off_by_default(self):
+        # Off by default: double spaces are left alone, not turned into newlines.
+        assert collate_mod.DECODE_DOUBLE_SPACE_LINEBREAKS is False
+        result = clean_pathology_text("Line one.  Line two.")
+        assert "\n" not in result
+        assert "Line one." in result
+        assert "Line two." in result
+
+    def test_double_space_linebreak_decoding_when_enabled(self, monkeypatch):
+        # Opt-in for sources that encode line breaks as double spaces.
+        monkeypatch.setattr(collate_mod, "DECODE_DOUBLE_SPACE_LINEBREAKS", True)
+        result = collate_mod.clean_pathology_text("Line one.  Line two.")
         assert "\n" in result
 
 

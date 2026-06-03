@@ -25,6 +25,16 @@ def _path_row(report_id: str, mrn: str, text: str, row_id: int = 1) -> dict:
     }
 
 
+def _clean_path_row(report_id: str, mrn: str, text: str) -> dict:
+    # Already-clean: one row per report with report_text, no mult_ln_val_storage.
+    return {
+        "report_id": report_id,
+        "mrn": mrn,
+        "report_text": text,
+        "ordering_date": "2024-01-15",
+    }
+
+
 class TestDatedReplay:
     def test_replay_two_files_in_date_order(self, oncai_config):
         inbox = oncai_config.inbox_path / "pathology"
@@ -115,6 +125,32 @@ class TestDatedFilenameValidation:
         assert "another_one.csv" in str(excinfo.value)
         # The valid file shouldn't be listed as an offender
         assert "2024-11-09_path.csv" not in str(excinfo.value).split("Offenders:")[1]
+
+
+class TestAlreadyCleanReports:
+    def test_clean_reports_skip_collation(self, oncai_config):
+        inbox = oncai_config.inbox_path / "pathology"
+        inbox.mkdir(parents=True, exist_ok=True)
+        # Double spaces that collation would have reflowed into newlines.
+        text = "DIAGNOSIS: Clear cell RCC.  Margins negative."
+        _make_path_csv(
+            inbox / "2024-11-09_clean.csv",
+            [_clean_path_row("A", "M1", text), _clean_path_row("B", "M2", "Benign.")],
+        )
+
+        results = run_ingest(oncai_config, folder="pathology")
+        r = results[0]
+        assert r.row_count == 2
+        # The skip is surfaced to the user via notes.
+        assert any("skipping collation" in n for n in r.notes)
+
+        df = pl.read_parquet(
+            oncai_config.lake_path / "pathology" / "pathology.parquet"
+        )
+        a_text = df.filter(pl.col("report_id") == "A").row(0, named=True)["report_text"]
+        # Preserved verbatim: double spaces not reflowed, nothing stripped.
+        assert a_text == text
+        assert {"key_hash", "content_hash"}.issubset(df.columns)
 
 
 class TestLakeOnlyFolders:

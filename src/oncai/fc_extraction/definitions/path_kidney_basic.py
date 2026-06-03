@@ -14,7 +14,6 @@ extraction lives in kidney_path_nephrectomy and path_procedure_site_hist.
 Used with batch_single.py for single-note processing.
 """
 
-# TODO: CLEAN UP CODE AND UPDATE DOC STRINGS
 from __future__ import annotations
 
 import logging
@@ -29,7 +28,7 @@ from ..tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-DEFINITION_NAME = "KidneyPathBasic"
+DEFINITION_NAME = "PathKidneyBasic"
 
 
 # =============================================================================
@@ -356,7 +355,7 @@ Do NOT flag for routine 'uncertain' or 'not specified' calls.
 # =============================================================================
 
 
-def create_kidney_path_basic_registry() -> ToolRegistry:
+def create_path_kidney_basic_registry() -> ToolRegistry:
     """Create the triage tool registry. Three tools: plan_triage (orient), then
     triage_report (always called once per report), and flag_report_for_review
     (used sparingly)."""
@@ -396,7 +395,3 @@ def create_kidney_path_basic_registry() -> ToolRegistry:
     )
 
     return registry
-
-
-# Backwards-compatible alias for the previous factory name used by the CLI.
-create_kidney_path_simple_registry = create_kidney_path_basic_registry

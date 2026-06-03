@@ -4,7 +4,7 @@ A small data-lake + LLM-extraction toolkit for pathology reports. Ingests raw CS
 
 Designed for one-report-in / one-set-of-findings-out workloads (e.g. nephrectomy pathology reports → tumor type + stage + margins + IHC results).
 
-> See [docs/architecture.md](docs/architecture.md) for how the system works and [docs/design.md](docs/design.md) for why.
+> See [docs/architecture.md](docs/architecture.md) for how the system works, [docs/design.md](docs/design.md) for why, and [docs/incremental_extraction.md](docs/incremental_extraction.md) for incremental / addenda re-extraction.
 
 ## Quickstart
 
@@ -16,7 +16,7 @@ uv sync
 oncai init --remote /path/to/shared/data
 
 # Pull data from remote (parquet lake + inbox files)
-oncai sync
+oncai pull
 
 # Preview an ingest
 oncai ingest --dry-run
@@ -35,7 +35,7 @@ oncai fc run-single path_kidney_basic \
     --limit 20
 
 # Inspect / iterate the resulting JSONL
-oncai fc stage fc_outputs/KidneyPathBasic/v1.jsonl
+oncai fc stage fc_outputs/PathKidneyBasic/v1.jsonl
 oncai fc status
 
 # Push results back to remote
@@ -46,7 +46,7 @@ oncai push fc_extractions
 
 ```
 Remote (Box / shared drive)    Lake (local parquet)         DuckDB (queryable)
-┌──────────────────┐  sync  ┌─────────────────────┐  build  ┌─────────────────┐
+┌──────────────────┐  pull  ┌─────────────────────┐  build  ┌─────────────────┐
 │ pathology/       │ ─────► │ lake/pathology/     │ ──────► │ raw.pathology   │
 │ cohorts/         │        │ lake/cohorts/       │ ──────► │ cohort.<name>   │
 │ fc_extractions/  │        │ lake/fc_extractions/│ ──────► │ extractions_raw.│
@@ -59,7 +59,7 @@ Remote (Box / shared drive)    Lake (local parquet)         DuckDB (queryable)
                             └─────────────────────┘
 ```
 
-**Data flow:** Remote → `sync` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL → `ingest fc_extractions` → Lake → `push` → Remote.
+**Data flow:** Remote → `pull` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL → `ingest fc_extractions` → Lake → `push` → Remote.
 
 **Why a lake + DuckDB:** the parquet lake is the source of truth (versioned, content-hashed merges). DuckDB is rebuilt from the lake on demand — no migrations, no schema drift between extractions and source data.
 
@@ -70,7 +70,7 @@ Remote (Box / shared drive)    Lake (local parquet)         DuckDB (queryable)
 | Command | Description |
 |---|---|
 | `oncai init` | Initialize folder structure and write `oncai.yaml` |
-| `oncai sync [FOLDER...]` | Pull parquet lake + inbox files from remote |
+| `oncai pull [FOLDER...]` | Pull parquet lake + inbox files from remote |
 | `oncai push [FOLDER...]` | Push local lake + inbox files to remote |
 | `oncai ingest [DATASET]` | Replay inbox files into lake parquets |
 | `oncai build-db` | Build DuckDB from lake parquets |
@@ -78,7 +78,7 @@ Remote (Box / shared drive)    Lake (local parquet)         DuckDB (queryable)
 | `oncai schemas` | List registered dataset schemas |
 | `oncai version` | Show version |
 
-Options: `--dry-run` previews `sync` / `push` / `ingest` without writing. `--force` recreates the DuckDB.
+Options: `--dry-run` previews `pull` / `push` / `ingest` without writing. `--force` recreates the DuckDB.
 
 ### Database Management (`oncai db`)
 
@@ -130,6 +130,8 @@ Key options for `fc run-single`:
 --reasoning-effort <lvl>   Azure reasoning depth: low / medium / high / none
 ```
 
+`--incremental` re-extracts only new and changed reports (addenda) against a baseline batch, writing a versioned `<batch>.v<N>.jsonl` that merges back into the same lake parquet. See [docs/incremental_extraction.md](docs/incremental_extraction.md) for the full workflow, versioned batches, and `--force-rerun`.
+
 ### Cohorts (`oncai cohort`)
 
 Named lists of report_ids or mrns used to scope FC runs.
@@ -152,6 +154,59 @@ Every `fc run-single` invocation logs metadata to `lake/runs/runs.parquet` (and 
 | `oncai runs list [--type <t>]` | List recent runs |
 | `oncai runs show <id>` | Show full details for one run |
 | `oncai runs compare <id1> <id2>` | Side-by-side diff of two runs |
+
+## Ingesting data
+
+Data enters through `inbox/<folder>/` and is replayed into the parquet lake by `oncai ingest`. Preview first with `oncai ingest --dry-run`; ingest reports exactly what it did (column renames, inferred fields, collation vs passthrough) so nothing happens silently. Re-running is idempotent — the content-hash merge writes only new or changed rows.
+
+### Pathology reports
+
+Drop dated CSVs into `inbox/pathology/` named `YYYY-MM-DD_<label>.csv` (the date orders replay; the label is free text). Ingest accepts two shapes and auto-detects which you have.
+
+**1. Raw multi-line export** — one row per report *line*, collated into one row per report:
+
+| Column | Required | Notes |
+|---|---|---|
+| `report_id` | yes | Report identity (also accepts Epic `case_num`). |
+| `mult_ln_val_storage` | yes | Report text, one fragment per row. |
+| `row_id` | no | Line order within a report; inferred from CSV order if absent. |
+| `mrn` | no | Patient identifier (also accepts Epic `pat_mrn_id`). |
+| `ordering_date` | no | Normalized to `YYYY-MM-DD`. |
+| `external_name` | no | Section tag; `gross` / `micro` / `addlinfo` rows are dropped. |
+
+Fragments are joined with no delimiter (they may be cut mid-word), then generic text cleaning is applied (Unicode / whitespace / line-ending normalization).
+
+**2. Already-clean reports** — one row per report, text ready to go:
+
+| Column | Required | Notes |
+|---|---|---|
+| `report_id` | yes | Report identity. |
+| `report_text` | yes | Final report text, used verbatim. |
+| `mrn`, `ordering_date` | no | Carried through if present. |
+
+If `report_text` is present and there's no `mult_ln_val_storage`, ingest treats the file as already clean and **passes it through untouched** — no collation, no text cleaning — adding only the content hashes.
+
+#### Cleaning knobs (pathology)
+
+The multi-line path always applies generic cleaning. Two source-specific steps are **off by default** so one site's format isn't forced on everyone; enable them in `src/oncai/transforms/collate.py`:
+
+- `PATHOLOGY_BOILERPLATE_PATTERNS` — regexes stripped from report text (ships empty). Add your institution's attestation / disclaimer boilerplate here.
+- `DECODE_DOUBLE_SPACE_LINEBREAKS` — set `True` if your source encodes line breaks as double spaces, to decode them back into newlines.
+
+### Other folders
+
+- `inbox/cohorts/<name>.csv` → `oncai ingest cohorts` (one parquet per file; the filename is the cohort name).
+- `inbox/fc_extractions/<batch>.jsonl` → `oncai ingest fc_extractions` (extraction outputs merged back into the lake).
+
+### Skip the lake for ready-made notes
+
+If you already have clean notes in a JSONL and only want extraction, you don't need to ingest at all — point `fc run-single` straight at the file:
+
+```bash
+oncai fc run-single path_kidney_basic --jsonl notes.jsonl --batch v1 --backend gpt5mini
+```
+
+`--jsonl` reads notes directly (no DuckDB, no lake); `--text-col` / `--id-col` locate the note text and id (default `report_text` / `report_id`).
 
 ## DuckDB Schemas
 
@@ -187,7 +242,7 @@ A definition module exposes three things: `DEFINITION_NAME` (used as the output 
 ```
 src/oncai/
 ├── cli/                        # Typer CLI
-│   ├── main_cmds.py            # init, sync, push, ingest, build-db, status, schemas, version
+│   ├── main_cmds.py            # init, pull, push, ingest, build-db, status, schemas, version
 │   ├── fc_cmds.py              # fc run-single, list, status, stage, unstage, manifest
 │   ├── cohort_cmds.py          # cohort add, list, info, remove
 │   ├── runs_cmds.py            # runs list, show, compare
@@ -263,3 +318,7 @@ llm_backends:
 ```
 
 LLM backends are named configurations referenced by `--backend <name>`. API keys are read from environment variables (set in `.env` or your shell).
+
+## License
+
+OncAI is licensed under the **GNU Affero General Public License v3.0** — see [LICENSE](LICENSE) for the full text. Under the AGPL's network-use clause (section 13), running a modified version as a network service obligates you to offer those users the corresponding source.

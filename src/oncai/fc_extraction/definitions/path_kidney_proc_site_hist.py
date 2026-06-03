@@ -11,7 +11,6 @@ belong to when a report covers multiple specimens.
 Used with batch_single.py for single-note processing.
 """
 
-# TODO: CLEAN UP CODE AND UPDATE DOC STRINGS
 from __future__ import annotations
 
 import logging
@@ -26,7 +25,7 @@ from oncai.fc_extraction.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-DEFINITION_NAME = "PathProcedureSiteHist"
+DEFINITION_NAME = "PathKidneyProcSiteHist"
 
 
 # =============================================================================
@@ -650,7 +649,7 @@ that no listed value fits. Routine "Not specified" cases do NOT warrant a flag.
 # =============================================================================
 
 
-def create_path_procedure_site_hist_registry() -> ToolRegistry:
+def create_path_kidney_proc_site_hist_registry() -> ToolRegistry:
     """Create tool registry for procedure / anatomical site / histology extraction.
 
     Workflow: plan_specimens → plan_specimen_findings (per specimen) →
