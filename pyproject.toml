@@ -7,7 +7,6 @@ name = "oncai"
 version = "0.2.0"
 description = "Oncology data lake and single-note LLM extraction toolkit"
 readme = "README.md"
-license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [{ name = "David Hein", email = "davidhein67@gmail.com" }]
 maintainers = [{ name = "David Hein" }]

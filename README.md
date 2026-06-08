@@ -1,5 +1,4 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Use uv](https://img.shields.io/badge/recommended%20installer-uv-4584b6.svg)](https://docs.astral.sh/uv/)
 
 # OncAI — Oncology Data Lake + Single-Note FC Extraction
