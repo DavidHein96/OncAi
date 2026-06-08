@@ -791,6 +791,46 @@ def _prelog_run(
         return run_id
 
 
+def _build_review_package_for_run(
+    *,
+    note_config,
+    registry,
+    output_path: str,
+    source: str | None,
+    jsonl: Path | None,
+    db_path: Path,
+    text_col: str,
+    id_col: str,
+) -> None:
+    """Build the ``*.review_pkg.json`` for a just-completed batch.
+
+    Best-effort: a packaging failure is reported in yellow but never fails the
+    run — the extraction JSONL is the source of truth and is already on disk.
+    """
+    from oncai.review import package_from_jsonl
+
+    try:
+        if jsonl is not None:
+            source_table: str | None = f"jsonl:{jsonl}"
+            notes_db: Path | None = jsonl
+        else:
+            source_table = source
+            notes_db = db_path
+        pkg_path = package_from_jsonl(
+            jsonl_path=Path(output_path),
+            registry=registry,
+            definition_name=note_config.name,
+            source_table=source_table,
+            db_path=notes_db,
+            text_col=text_col,
+            id_col=id_col,
+        )
+    except Exception as e:
+        console.print(f"  [yellow]Warning: failed to build review package: {e}[/yellow]")
+    else:
+        console.print(f"  Review package: {pkg_path}")
+
+
 def _finalize_run(
     *,
     run_id: str | None,
@@ -1122,6 +1162,85 @@ def fc_run_single(
 
     console.print(f"\n[green]✓[/green] {result}")
     console.print(f"  Output: {result.output_path}")
+
+    # Build a physician-review package next to the batch JSONL so a completed
+    # run is immediately review-ready (open it in the oncai review app).
+    _build_review_package_for_run(
+        note_config=note_config,
+        registry=registry,
+        output_path=result.output_path,
+        source=source,
+        jsonl=jsonl,
+        db_path=config.db_path,
+        text_col=text_col,
+        id_col=id_col,
+    )
+
+
+@fc_app.command(name="review-package")
+def fc_review_package(
+    batch: Path = typer.Argument(
+        ...,
+        help="Path to a completed batch JSONL "
+        "(e.g. fc_outputs/PathKidneyBasic/v1.jsonl).",
+    ),
+    definition: str | None = typer.Option(
+        None,
+        "--definition",
+        "-d",
+        help="Definition name (see `oncai fc list`). Gives the package a richer "
+        "field schema (enum options, required-ness). Auto-detected from the "
+        "batch manifest when omitted.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Where to write the .review_pkg.json "
+        "(default: <batch>.review_pkg.json beside the JSONL).",
+    ),
+    db: Path | None = typer.Option(
+        None,
+        "--db",
+        help="DuckDB path for loading source notes "
+        "(default: from the batch manifest, then oncai.yaml).",
+    ),
+):
+    """Build a physician-review package from an already-completed batch.
+
+    Reads the batch JSONL and its ``_manifest.json`` sidecar, re-loads the
+    source notes, and writes a ``*.review_pkg.json`` for the oncai review app.
+
+    Examples:
+        oncai fc review-package fc_outputs/PathKidneyBasic/v1.jsonl
+        oncai fc review-package fc_outputs/PathKidneyBasic/v1.jsonl -d path_kidney_basic
+    """
+    from oncai.review import package_from_batch
+
+    if not batch.exists():
+        _bail(f"Batch JSONL not found: {batch}")
+
+    config = get_config()
+    registry = None
+    if definition is not None:
+        _, registry = _load_definition(definition)
+
+    db_path = db or config.db_path
+    try:
+        pkg_path = package_from_batch(
+            jsonl_path=batch,
+            registry=registry,
+            db_path=db_path if db_path.exists() else None,
+            output_path=output,
+        )
+    except FileNotFoundError as e:
+        _bail(str(e))
+
+    console.print(f"[green]✓[/green] Wrote review package: {pkg_path}")
+    console.print(
+        "  Open it in the oncai review app "
+        "(review_app_reference/server.py --package <file>)."
+    )
 
 
 @fc_app.command(name="unstage")

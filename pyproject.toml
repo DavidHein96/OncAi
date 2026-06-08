@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oncai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Oncology data lake and single-note LLM extraction toolkit"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -167,6 +167,10 @@ max-bool-expr = 5
 # Same identifier-interpolation rationale as above: source_table / id_col /
 # text_col come from the caller and can't be parameter-bound in DuckDB.
 "src/oncai/fc_extraction/batch_single.py" = ["S608"]
+# Same identifier-interpolation rationale: the review note-loader builds its
+# SELECT from source_table / text_col / id_col / auto-detected display columns,
+# none of which DuckDB can parameter-bind. Reads the user's own local DuckDB.
+"src/oncai/review/notes.py" = ["S608"]
 # db.py is the lake → DuckDB builder. Schema/table names come from lake
 # folder + parquet stems and are double-quoted via the _q() helper before
 # interpolation; parquet paths and filter values are passed via `?` bind

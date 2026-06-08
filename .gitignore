@@ -58,3 +58,5 @@ site/
 *_manifest.json
 oncai.yaml
 TODO
+review_app_reference
+*.review_pkg.json

@@ -104,49 +104,6 @@ class PhysicianConfidence(StrEnum):
     NOT_APPLICABLE = "not applicable"
 
 
-# class AnatomicalSiteBroad(str, Enum):
-#     """Broad anatomical category for anatomical sites"""
-
-#     LUNG = "Lung"
-#     BONE_EXCEPT_SPINE = "Bone, except spine"
-#     SPINE = "Spine, vertebral column"
-#     LIVER = "Liver"
-#     BRAIN = "Brain"
-#     ADRENAL_GLAND = "Adrenal gland"
-#     LYMPH_NODE_RENAL_HILAR = "Lymph node, renal hilar"
-#     LYMPH_NODE_RETROPERITONEAL = "Lymph node, regional retroperitoneal"
-#     LYMPH_NODE_THORACIC = "Lymph node, thoracic / mediastinal"
-#     LYMPH_NODE_HEAD_NECK = "Lymph node, head / neck"
-#     LYMPH_NODE_PELVIC_INGUINAL = "Lymph node, pelvic / inguinal"
-#     LYMPH_NODE_OTHER = "Lymph node, other specified"
-#     LYMPH_NODE_UNSPECIFIED = "Lymph node, unspecified"
-#     PERITONEUM = "Peritoneum"
-#     DISTAL_EXTRAHEPATIC_BILE_DUCT = "Distal extrahepatic bile duct"
-#     PERIHILAR_BILE_DUCT = "Perihilar bile duct"
-#     PANCREAS = "Pancreas"
-#     SKIN = "Skin"
-#     THYROID = "Thyroid"
-#     THYMUS = "Thymus"
-#     KIDNEY_LEFT = "Kidney, left"
-#     KIDNEY_RIGHT = "Kidney, right"
-#     KIDNEY_UNSPECIFIED = "Kidney, unspecified laterality"
-#     GALLBLADDER = "Gallbladder"
-#     RENAL_PELVIS = "Renal pelvis"
-#     PERIRENAL_FAT = "Perirenal fat"
-#     URETER = "Ureter"
-#     BLADDER = "Bladder"
-#     INFERIOR_VENA_CAVA = "Inferior vena cava"
-#     RENAL_VEIN = "Renal vein"
-#     RENAL_SINUS = "Renal sinus"
-#     COLON = "Colon"
-#     OTHER_GENITOURINARY = "Other genitourinary site"
-#     OTHER_ABDOMINAL = "Other abdominal site"
-#     OTHER_ENDOCRINE = "Other endocrine site"
-#     OTHER_GASTROINTESTINAL = "Other gastrointestinal site"
-#     OTHER_GYNECOLOGIC = "Other gynecologic site"
-#     OTHER_NOT_LISTED = "Other, not listed"
-
-
 class AnatomicalSiteBroad(StrEnum):
     """Broad anatomical category for biopsy, metastasis, and resection sites.
 
@@ -235,26 +192,6 @@ class AnatomicalSiteBroad(StrEnum):
 
     OTHER = "Other"
     NOT_SPECIFIED = "Not specified"
-
-
-# class LymphNodeType(str, Enum):
-#     HILAR = "Hilar"
-#     PRECAVAL = "Precaval"
-#     INTERAORTOCAVAL = "Interaortocaval"
-#     PARACAVAL = "Paracaval"
-#     RETROCAVAL = "Retrocaval"
-#     PREAORTIC = "Preaortic"
-#     PARAORTIC = "Paraaortic"
-#     RETROAORTIC = "Retroaortic"
-#     PELVIC = "Pelvic"
-#     RETROPERITONEAL = "Retroperitoneal"
-#     SUBPECTORAL = "Subpectoral"
-#     AXILLARY = "Axillary"
-#     INGUINAL = "Inguinal"
-#     CERVICAL = "Cervical"
-#     SUBMANDIBULAR = "Submandibular"
-#     SUPRACLAVICULAR = "Supraclavicular"
-#     AORTOCAVAL = "Aortocaval"
 
 
 class LymphNodeType(StrEnum):
