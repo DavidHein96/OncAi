@@ -8,6 +8,12 @@ version = "0.2.0"
 description = "Oncology data lake and single-note LLM extraction toolkit"
 readme = "README.md"
 license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "License :: Free For Educational Use",
+    "License :: Free for non-commercial use",
+]
 authors = [{ name = "David Hein", email = "davidhein67@gmail.com" }]
 maintainers = [{ name = "David Hein" }]
 requires-python = ">=3.11"

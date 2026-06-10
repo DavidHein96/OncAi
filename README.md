@@ -339,4 +339,6 @@ LLM backends are named configurations referenced by `--backend <name>`. API keys
 
 ## License
 
-OncAI is licensed under the **GNU Affero General Public License v3.0** — see [LICENSE](LICENSE) for the full text. Under the AGPL's network-use clause (section 13), running a modified version as a network service obligates you to offer those users the corresponding source.
+Copyright (c) 2026 The University of Texas Southwestern Medical Center and David M Hein, Lyda Hill Department of Bioinformatics.
+
+OncAI is source-available for academic research use under the custom UT Southwestern academic research license in [`LICENSE`](LICENSE). Commercial use and redistribution by for-profit entities are prohibited.
