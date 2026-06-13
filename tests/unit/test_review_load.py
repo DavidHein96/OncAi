@@ -381,8 +381,12 @@ def test_ingest_fc_reviews_writes_lake_parquet_and_sidecars(oncai_config) -> Non
     package_path = batch_dir / f"demo.001{REVIEW_PACKAGE_SUFFIX}"
     reviews_path = batch_dir / f"demo.001{REVIEW_LOG_SUFFIX}"
     raw_path = oncai_config.inbox_path / "fc_extractions" / "demo" / "001.jsonl"
+    sql_path = batch_dir / "demo.sql"
     package_path.write_text(json.dumps(_review_package(batch="demo.001")))
     reviews_path.write_text("\n".join(json.dumps(r) for r in _reviews()) + "\n")
+    sql_path.write_text(
+        "CREATE OR REPLACE TABLE extractions_gold.demo AS SELECT 1 AS n;"
+    )
     _write_raw_jsonl(
         raw_path,
         [
@@ -410,6 +414,13 @@ def test_ingest_fc_reviews_writes_lake_parquet_and_sidecars(oncai_config) -> Non
     df = pl.read_parquet(lake_parquet)
     assert df.height == 1
     assert df.row(0, named=True)["diagnosis"] == "edited clear cell carcinoma"
+
+    lake_sql = oncai_config.lake_path / "fc_reviews" / "demo.sql"
+    assert lake_sql.read_text() == sql_path.read_text()
+    assert any(
+        "demo/demo.sql: SQL transform mirrored to lake as demo.sql" in note
+        for note in result.notes
+    )
 
 
 def test_ingest_fc_reviews_ignores_flat_layout(oncai_config) -> None:

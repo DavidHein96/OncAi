@@ -55,11 +55,11 @@ oncai push fc_extractions
 │ inbox/fc_extractions/  │  push   │  append-only,    │         │  disposable      │        (raw.pathology,
 │ inbox/fc_reviews/      │         │  content-hashed  │         │  projection      │         cohort.<name>,
 │ inbox/runs/            │         └──────────────────┘         └──────────────────┘         extractions_raw,
-└────────────────────────┘                                                                   extractions_gold,
+└────────────────────────┘                                                                   extractions_silver/gold,
    only the inbox is synced — the lake + DuckDB never leave the machine                      runs.runs)
 ```
 
-**Data flow:** Remote inbox → `pull` → local inbox → `ingest` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL **back into `inbox/fc_extractions/`** → `ingest fc_extractions` → review package + `*.reviews.jsonl` → `ingest fc_reviews` → `extractions_gold.<batch>` → `push` (inbox) → Remote.
+**Data flow:** Remote inbox → `pull` → local inbox → `ingest` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL **back into `inbox/fc_extractions/`** → `ingest fc_extractions` → review package + `*.reviews.jsonl` → `ingest fc_reviews` → `extractions_silver.<batch>` → optional batch-local SQL reshape → `extractions_gold.*` → `push` (inbox) → Remote.
 
 **Why inbox-canonical:** the **inbox** is the source of truth — immutable, content-hashed, append-only. Everything irreproducible lives there: raw drops, extraction JSONLs, review verdicts, and per-run manifests. The lake and DuckDB are disposable projections rebuilt from the inbox on demand, so there are no migrations, no schema drift, and no whole-file clobber between machines (only the inbox is ever transferred).
 
@@ -230,7 +230,7 @@ The multi-line path always applies generic cleaning. Two source-specific steps a
 
 - `inbox/cohorts/<name>.csv` → `oncai ingest cohorts` (one parquet per file; the filename is the cohort name).
 - `inbox/fc_extractions/<batch>/NNN.jsonl` → `oncai ingest fc_extractions` (a batch is a folder of numbered segments; segments merge into one lake parquet, highest segment per record wins). `fc run-single` promotes its output here automatically.
-- `inbox/fc_reviews/<batch>.NNN.review_pkg.json` + `<batch>.NNN.reviews.jsonl` → `oncai ingest fc_reviews` (a batch's per-segment reviews merge into `extractions_gold.<batch>`; approved events only, highest segment per note wins).
+- `inbox/fc_reviews/<batch>/<batch>.NNN.review_pkg.json` + `<batch>.NNN.reviews.jsonl` → `oncai ingest fc_reviews` (a batch's per-segment reviews merge into `extractions_silver.<batch>`; approved events only, highest segment per note wins).
 
 ### Skip the lake for ready-made notes
 
@@ -249,12 +249,17 @@ oncai fc run-single path_kidney_basic --jsonl notes.jsonl --batch v1 --backend g
 | `raw` | `pathology` | Pathology reports (collated multi-line CSVs → one row per report) |
 | `cohort` | `cohorts` | One table per named cohort + `cohort.meta` |
 | `extractions_raw` | `fc_extractions` | One table per FC batch, wide row-per-note layout |
-| `extractions_gold` | `fc_reviews` | One table per completed review batch, approved events with edits applied |
-| `extractions_transformed` | (per-batch `.sql` files) | Materialized derived tables from `<batch>.sql` |
+| `extractions_silver` | `fc_reviews` | One table per completed review batch, approved events with edits applied |
+| `extractions_gold` | `fc_reviews/<batch>/<batch>.sql` | Dense tables reshaped from reviewed silver batches |
+| `extractions_transformed` | `fc_extractions/<batch>/<batch>.sql` | Materialized derived tables from raw FC batches |
 | `scratch` | `oncai fc peek` | Throwaway per-event layout for a quick look (cleared on rebuild) |
 | `runs` | `runs` | Run-log history (one row per `fc run-single`) |
 
-Per-batch SQL transforms: dropping `<batch>.sql` next to `lake/fc_extractions/<batch>.parquet` runs at `build-db` time. Use it to reshape `events_json` columns into typed relational tables for downstream queries.
+Per-batch SQL transforms live beside the inbox batch artifacts:
+`inbox/fc_extractions/<batch>/<batch>.sql` mirrors to
+`lake/fc_extractions/<batch>.sql`, and `inbox/fc_reviews/<batch>/<batch>.sql`
+mirrors to `lake/fc_reviews/<batch>.sql`. `build-db` runs those lake sidecars
+after loading the matching parquet.
 
 ## Adding a New Definition
 

@@ -32,8 +32,8 @@ Inbox CSVs are replayed into a versioned parquet lake. Each folder has a fixed i
 | Mode | Folder | What ingest does |
 |---|---|---|
 | DATED | `pathology` | Replay all `YYYY-MM-DD_*.csv` files in date order, rebuilding `lake/<folder>/<folder>.parquet` from scratch via key/content-hash merge. |
-| STATIC | `fc_extractions` | Each inbox file maps to its own lake parquet (filename stem becomes the parquet/table name). |
-| STATIC | `fc_reviews` | Per-segment `<batch>.NNN.review_pkg.json` + `.reviews.jsonl` pairs; a batch's segment reviews merge (highest segment per note) into one `extractions_silver.<batch>` parquet. An optional `<batch>.sql` sidecar reshapes it into `extractions_gold`. |
+| STATIC | `fc_extractions` | Per-batch segment folders (`<batch>/NNN.jsonl`) merge into one `extractions_raw.<batch>` parquet. Optional `<batch>/<batch>.sql` sidecars reshape raw outputs into `extractions_transformed`. |
+| STATIC | `fc_reviews` | Per-segment `<batch>/<batch>.NNN.review_pkg.json` + `.reviews.jsonl` pairs merge (highest segment per note) into one `extractions_silver.<batch>` parquet. Optional `<batch>/<batch>.sql` sidecars reshape silver into `extractions_gold`. |
 | NAMED | `cohorts` | Filename = identity; one parquet per CSV. |
 | MANIFEST | `runs` | Each `fc run-single` writes an immutable `inbox/runs/<run_id>.run.json` (started → completed in place); ingest unions the manifests into `lake/runs/runs.parquet`. |
 
@@ -41,7 +41,7 @@ Per-folder transforms live in `transforms/`:
 - **Pathology collation** (`transforms/collate.py`) — multi-line CSV reports are reassembled into one row per `report_id`, then generic text cleaning is applied (Unicode normalization, whitespace and line-ending standardization). Two cleaning steps are opt-in and off by default, since they encode source-specific assumptions: site-specific boilerplate stripping (`PATHOLOGY_BOILERPLATE_PATTERNS`, ships empty) and decoding double-spaces back into line breaks (`DECODE_DOUBLE_SPACE_LINEBREAKS`). Reports that are already one-row-per-report (a `report_text` column and no `mult_ln_val_storage`) are auto-detected and passed through untouched — hashes only, no collation or cleaning. Each row gets `key_hash` (Blake2b of identity cols) and `content_hash` (Blake2b of content cols) so subsequent re-ingests are incremental.
 - **Passthrough** (`transforms/passthrough.py`) — identity transform with schema validation; not currently used by shipped folders but available for callers that just need column-type enforcement.
 
-`build-db` reads all lake parquets into a single DuckDB file organized by schema. Optionally per-folder `<batch>.sql` transforms run after the base load so each curated batch can declare its own derived tables.
+`build-db` reads all lake parquets into a single DuckDB file organized by schema. Optionally per-batch SQL transforms run after the base load so each curated batch can declare its own derived tables.
 
 ### 2. Extraction layer
 
@@ -76,12 +76,12 @@ The DuckDB is rebuilt from the lake on demand. Schemas:
 | `cohort` | `cohorts` | One table per named cohort + `cohort.meta` registry |
 | `extractions_raw` | `fc_extractions` | One table per FC batch, wide row-per-note layout |
 | `extractions_silver` | `fc_reviews` | One table per completed review batch, approved events with edits applied (event-grain, sparse) |
-| `extractions_gold` | `fc_reviews` `<batch>.sql` sidecars | Dense per-concept tables reshaped from a batch's silver table |
-| `extractions_transformed` | per-batch `<batch>.sql` files | User-declared derived tables (typed events from `events_json`, etc.) |
+| `extractions_gold` | `fc_reviews/<batch>/<batch>.sql` sidecars | Dense per-concept tables reshaped from a batch's silver table |
+| `extractions_transformed` | `fc_extractions/<batch>/<batch>.sql` sidecars | User-declared derived tables (typed events from `events_json`, etc.) |
 | `scratch` | `oncai fc peek` | Throwaway per-event layout for a quick look (cleared on rebuild) |
 | `runs` | `runs` | Run-log history (one row per `fc run-single` invocation) |
 
-The wide layout in `extractions_raw.<batch>` keeps `events_json`, `finish_json`, `run_meta_json` as JSON strings — schema doesn't evolve with new event types. Relational reshaping into typed tables happens at `build-db` time via the `<batch>.sql` transform sidecars.
+The wide layout in `extractions_raw.<batch>` keeps `events_json`, `finish_json`, `run_meta_json` as JSON strings — schema doesn't evolve with new event types. Relational reshaping into typed tables happens at `build-db` time via batch-local transform sidecars.
 
 Review packages are intentionally selective. A normal run auto-builds a package
 for reports that called `flag_report_for_review`; `oncai fc review-package` can

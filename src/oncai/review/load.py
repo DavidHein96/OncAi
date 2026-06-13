@@ -3,9 +3,10 @@
 The output of this module is the **silver** layer: human-adjudicated, event-grain
 rows. It is validated and trustworthy but still sparse — a definition's distinct
 event tools share one wide table. Reshaping silver into dense, per-concept
-**gold** tables is a separate SQL step: a per-batch ``<batch>.sql`` sidecar in the
-review inbox, mirrored to the lake and run by ``oncai build-db`` against that
-batch's ``extractions_silver.<batch>`` table (see ``docs/review_system.md``).
+**gold** tables is a separate SQL step: a batch-local
+``inbox/fc_reviews/<batch>/<batch>.sql`` sidecar, mirrored to the lake and run
+by ``oncai build-db`` against that batch's ``extractions_silver.<batch>`` table
+(see ``docs/review_system.md``).
 """
 
 from __future__ import annotations

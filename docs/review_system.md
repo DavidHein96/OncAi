@@ -320,9 +320,8 @@ inbox/fc_reviews/<batch>/<batch>.002.review_pkg.json   # a later segment's revie
 inbox/fc_reviews/<batch>/<batch>.002.reviews.jsonl
 ```
 
-The loader discovers these recursively, so a flat
-`inbox/fc_reviews/<batch>.001.review_pkg.json` still works; the nested,
-batch-named layout is just the default the run hook writes.
+The nested, batch-named layout is the canonical shape the run hook writes and
+the ingest loader reads.
 
 Then run:
 
@@ -394,16 +393,17 @@ reviewed event losslessly. But an analyst usually wants a *dense* table: one row
 per concept, only the relevant columns, no JSON blobs. That projection is a
 **per-batch SQL sidecar**, and it's an inbox artifact like everything else.
 
-Drop a `<batch>.sql` next to the lake parquet's source and `oncai build-db` runs
-it right after building `extractions_silver.<batch>`, writing into the
+Drop `<batch>.sql` in that same review batch folder and `oncai build-db` runs it
+right after building `extractions_silver.<batch>`, writing into the
 `extractions_gold` schema:
 
 ```bash
 # author the reshape for one batch, referencing that batch's silver table
-cp docs/examples/ihc_gold_reshape.sql inbox/fc_reviews/kidney_v1.sql
+mkdir -p inbox/fc_reviews/kidney_v1
+cp docs/examples/ihc_gold_reshape.sql inbox/fc_reviews/kidney_v1/kidney_v1.sql
 # (edit it to point at extractions_silver."kidney_v1")
 
-oncai ingest fc_reviews     # mirrors *.sql from inbox/fc_reviews/ into the lake
+oncai ingest fc_reviews     # mirrors batch-local SQL into lake/fc_reviews/kidney_v1.sql
 oncai build-db              # builds silver, then runs lake/fc_reviews/kidney_v1.sql
 ```
 

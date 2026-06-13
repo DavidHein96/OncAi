@@ -157,6 +157,11 @@ class TestIngestFcExtractions:
         bd = oncai_config.inbox_path / "fc_extractions" / "mybatch"
         _write_segment(bd, 1, [_record("R1", "old"), _record("R2", "y")])
         _write_segment(bd, 2, [_record("R1", "NEW")])
+        sql_path = bd / "mybatch.sql"
+        sql_path.write_text(
+            "CREATE OR REPLACE TABLE extractions_transformed.mybatch AS "
+            "SELECT 1 AS n;"
+        )
 
         results = run_ingest(oncai_config, folder="fc_extractions")
         assert len(results) == 1
@@ -168,6 +173,14 @@ class TestIngestFcExtractions:
         r1 = df.filter(pl.col("record_id") == "R1").row(0, named=True)
         assert r1["segment"] == 2
         assert "NEW" in r1["events_json"]
+
+        lake_sql = oncai_config.lake_path / "fc_extractions" / "mybatch.sql"
+        assert lake_sql.read_text() == sql_path.read_text()
+        assert any(
+            "mybatch/mybatch.sql: SQL transform mirrored to lake as mybatch.sql"
+            in note
+            for note in results[0].notes
+        )
 
 
 # ---------------------------------------------------------------------------

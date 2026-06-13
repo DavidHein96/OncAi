@@ -35,6 +35,8 @@ from oncai.schemas.pathology import PATHOLOGY_SCHEMA
 from oncai.sidecar import ensure_sidecar
 from oncai.transforms import collate_pathology, passthrough_transform
 
+_BATCH_LOCAL_SQL_FOLDERS = {"fc_extractions", "fc_reviews"}
+
 # --- result types ---------------------------------------------------------
 
 
@@ -745,12 +747,13 @@ def _mirror_sql_files(
     *,
     dry_run: bool,
 ) -> None:
-    """Copy any ``*.sql`` files from ``inbox/<folder>/`` into ``lake/<folder>/``.
+    """Copy transform SQL sidecars from inbox into the lake.
 
-    SQL transforms are co-located with the parquets they operate on. Build-db
-    looks for ``<parquet_stem>.sql`` next to each lake parquet and executes it
-    after creating the base table. Per-folder ``<folder>.sql`` is also
-    supported for cross-parquet joins in DATED folders.
+    Batch folders keep SQL beside their canonical inbox artifacts:
+    ``inbox/<folder>/<batch>/<batch>.sql``. The lake remains flat at
+    ``lake/<folder>/<batch>.sql`` because build-db looks for
+    ``<parquet_stem>.sql`` next to each lake parquet. Non-batch folders keep the
+    older root-level ``inbox/<folder>/*.sql`` layout.
 
     SQL files are parse-validated before being mirrored — broken SQL is
     surfaced via ``result.notes`` and not copied to lake, so the lake
@@ -761,22 +764,48 @@ def _mirror_sql_files(
     inbox_dir = config.inbox_path / folder
     if not inbox_dir.exists():
         return
-    sql_files = sorted(inbox_dir.glob("*.sql"))
-    if not sql_files:
+    lake_dir = config.lake_path / folder
+
+    sql_pairs: list[tuple[Path, Path, str]] = []
+    if folder in _BATCH_LOCAL_SQL_FOLDERS:
+        for src in sorted(inbox_dir.glob("*.sql")):
+            result.notes.append(
+                f"{src.name}: SQL ignored — put batch SQL at "
+                f"inbox/{folder}/<batch>/<batch>.sql"
+            )
+        for src in sorted(inbox_dir.glob("*/*.sql")):
+            batch = src.parent.name
+            rel_name = f"{batch}/{src.name}"
+            if src.stem != batch:
+                result.notes.append(
+                    f"{rel_name}: SQL filename must match parent batch folder "
+                    f"'{batch}' (not mirrored)"
+                )
+                continue
+            sql_pairs.append((src, lake_dir / f"{batch}.sql", rel_name))
+    else:
+        sql_pairs = [
+            (src, lake_dir / src.name, src.name) for src in sorted(inbox_dir.glob("*.sql"))
+        ]
+
+    if not sql_pairs:
         return
 
-    lake_dir = config.lake_path / folder
-    for src in sql_files:
+    for src, dst, rel_name in sql_pairs:
         err = _validate_sql_syntax(src)
         if err:
-            result.notes.append(f"{src.name}: SQL invalid — {err} (not mirrored)")
+            result.notes.append(f"{rel_name}: SQL invalid — {err} (not mirrored)")
             continue
-        dst = lake_dir / src.name
         if not dry_run:
             lake_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             result.written_paths.append(dst)
-        result.notes.append(f"{src.name}: SQL transform mirrored to lake")
+        if rel_name == dst.name:
+            result.notes.append(f"{rel_name}: SQL transform mirrored to lake")
+        else:
+            result.notes.append(
+                f"{rel_name}: SQL transform mirrored to lake as {dst.name}"
+            )
 
 
 def _dispatch(

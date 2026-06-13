@@ -19,9 +19,9 @@ MULTI_TABLE_FOLDERS = {
 # Schema mapping: lake folder -> DuckDB schema name (where parquets are loaded).
 # fc_extractions lands in extractions_raw; its per-base .sql transforms write to
 # extractions_transformed. fc_reviews lands in extractions_silver — reviewed,
-# event-grain rows — and a per-batch ``<batch>.sql`` sidecar (mirrored from the
-# inbox, run by _run_sibling_sql) reshapes that batch's silver table into dense,
-# per-concept tables in extractions_gold.
+# event-grain rows — and a batch-local ``<batch>.sql`` sidecar (mirrored from
+# ``inbox/fc_reviews/<batch>/<batch>.sql``, run by _run_sibling_sql) reshapes
+# that batch's silver table into dense, per-concept tables in extractions_gold.
 SCHEMA_MAPPING = {
     "pathology": "raw",
     "cohorts": "cohort",
@@ -33,8 +33,8 @@ SCHEMA_MAPPING = {
 # Schemas that exist purely as transform destinations (no parquet ever lands
 # here). Auto-created by ``build_database`` so per-base .sql files can write
 # to them without doing CREATE SCHEMA themselves. ``extractions_gold`` is where a
-# review batch's ``<batch>.sql`` sidecar reshapes its reviewed (silver) table into
-# dense, per-concept tables.
+# review batch's batch-local ``<batch>.sql`` sidecar reshapes its reviewed
+# (silver) table into dense, per-concept tables.
 TRANSFORM_SCHEMAS: set[str] = {"extractions_transformed", "extractions_gold"}
 
 # Scratch schema — a throwaway namespace populated only by ``oncai fc peek``
@@ -212,7 +212,7 @@ def build_database(
     - extractions_silver: one table per completed review batch (reviewed,
       event-grain; sparse — a definition's event tools share a table)
     - extractions_gold: dense per-concept tables built by a review batch's
-      ``<batch>.sql`` sidecar reshaping its silver table
+      batch-local ``<batch>.sql`` sidecar reshaping its silver table
     - runs: run log
     - extractions_transformed / scratch: created empty for
       per-base ``.sql`` transforms and ``oncai fc peek`` to write into.

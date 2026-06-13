@@ -2,7 +2,7 @@
 --
 -- HOW IT RUNS
 --   Drop this beside a review batch in the inbox as
---       inbox/fc_reviews/<batch>.sql
+--       inbox/fc_reviews/<batch>/<batch>.sql
 --   `oncai ingest fc_reviews` mirrors it to lake/fc_reviews/<batch>.sql, and
 --   `oncai build-db` runs it immediately after building that batch's reviewed
 --   table extractions_silver."<batch>". So the script is *aligned with one
