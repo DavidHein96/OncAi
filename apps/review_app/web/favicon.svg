@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="OncAI Review">
+  <!-- App mark: a clipboard + checkmark (approve/review) on the UI accent blue. -->
+  <rect width="1024" height="1024" rx="228" fill="#2563eb" />
+  <!-- clip bar peeking out behind the board -->
+  <rect x="396" y="150" width="232" height="132" rx="50" fill="#bcd0ff" />
+  <!-- board -->
+  <rect x="272" y="228" width="480" height="576" rx="56" fill="#ffffff" />
+  <!-- clip on top of the board -->
+  <rect x="424" y="132" width="176" height="128" rx="42" fill="#ffffff" />
+  <rect x="476" y="168" width="72" height="40" rx="20" fill="#2563eb" />
+  <!-- checkmark -->
+  <path d="M368 540 l108 108 200 -244" fill="none" stroke="#16a34a" stroke-width="76"
+    stroke-linecap="round" stroke-linejoin="round" />
+</svg>

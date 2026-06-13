@@ -16,8 +16,8 @@ Usage:
         run_fc_single_batch,
     )
 
-    # Tool payloads inherit from ExtractionEvent so ``note_id`` / ``comment``
-    # are auto-populated; you only declare the task-specific fields.
+    # Tool payloads inherit from ExtractionEvent so ``note_id`` and
+    # ``evidence`` are available; you only declare the task-specific fields.
     class MyEvent(ExtractionEvent):
         event_date: str = Field(..., description="When the event occurred")
         details: str = Field(..., description="What happened")

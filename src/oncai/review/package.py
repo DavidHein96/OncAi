@@ -1,7 +1,7 @@
 """Assemble a ``*.review_pkg.json`` from a completed extraction batch.
 
 This is the producer side of the contract documented in
-``review_app_reference/server.py``: *"Reads a ``*.review_pkg.json`` produced by
+``apps/review_app/server.py``: *"Reads a ``*.review_pkg.json`` produced by
 ``oncai.review.package``."* The local physician-review server consumes exactly
 the JSON this module writes.
 
@@ -15,13 +15,14 @@ the frozen review app:
       "definition_name": "PathKidneyBasic",
       "batch": "v1",
       "generated_at": "2026-06-07T12:00:00+00:00",
+      "adjudication_hash": "9f2c…",   # comparability gate (see review.schema)
       "field_schema": { <event_type>: {label, fields[]} },   # how to render
       "patients": [
         {
           "mrn": "M0001",
           "notes": { <note_id>: {note_text, note_date, note_type, department} },
           "events": [
-            {"event_key", "event_type", "note_id", "fields": {...}}, ...
+            {"event_key", "event_type", "note_id", "fingerprint", "fields": {...}}, ...
           ]
         }, ...
       ]
@@ -50,14 +51,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from oncai.fc_extraction.load import _load_fc_records
-
 from .notes import load_source_notes
 from .schema import (
+    adjudication_hash,
     build_field_schema,
     infer_field_schema_from_events,
     merge_inferred_schema,
 )
+from .select import (
+    note_id_for_record,
+    record_has_review_flag,
+    successful_records_from_jsonl,
+)
+from .slots import SlotState, events_from_record, record_to_slots
 
 if TYPE_CHECKING:
     from oncai.fc_extraction.tools import ToolRegistry
@@ -84,23 +90,6 @@ def _patient_key(record: dict[str, Any]) -> str:
     return str(record.get("note_id") or "")
 
 
-def _events_from_record(record: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Flatten a record's ``events`` block to ``(event_type, event_dict)`` pairs.
-
-    Only the ``events`` block is reviewed — ``plans`` (orientation tools) are
-    intentionally skipped.
-    """
-    out: list[tuple[str, dict[str, Any]]] = []
-    events = record.get("events") or {}
-    for event_type, event_list in events.items():
-        if not isinstance(event_list, list):
-            continue
-        for event in event_list:
-            if isinstance(event, dict):
-                out.append((event_type, event))
-    return out
-
-
 def build_review_package(
     *,
     definition_name: str,
@@ -115,8 +104,13 @@ def build_review_package(
     ``records`` are the per-note JSONL records (successful ones; callers filter).
     ``field_schema`` says how to render each event type; ``notes`` maps note_id
     to the source text/metadata. Events are grouped into patients and each is
-    given a stable ``event_key`` of ``"<note_id>::<event_type>::<index>"`` so
-    re-building a package keeps the reviewer's prior verdicts aligned.
+    given an identity-addressed ``event_key`` of
+    ``"<note_id>::<event_type>::<identity>"`` — the declared
+    ``event_identity_fields`` where present, else the finding's ordinal for its
+    type in the report. This is the *slot* a verdict attaches to and the key that
+    aligns the same finding across runs for adjudication. Each event also carries
+    a ``fingerprint`` (a hash of its field values) for value-change detection and
+    cross-run agreement.
     """
     # event_type counts seen in the data, so the schema can be backfilled for
     # any type the registry didn't cover.
@@ -124,12 +118,15 @@ def build_review_package(
 
     # Preserve first-seen patient order for a stable sidebar.
     patients: dict[str, dict[str, Any]] = {}
+    # Identity-addressed slot keys: declared event_identity_fields where present,
+    # else the finding's ordinal for its type in the report. ``slot_state``
+    # assigns those ordinals and disambiguates rare identity clashes with a
+    # ``::<n>`` suffix.
+    slot_state = SlotState()
     for record in records:
         note_id = str(record.get("note_id") or "")
         key = _patient_key(record)
-        patient = patients.setdefault(
-            key, {"mrn": key, "notes": {}, "events": []}
-        )
+        patient = patients.setdefault(key, {"mrn": key, "notes": {}, "events": []})
 
         if note_id and note_id not in patient["notes"]:
             patient["notes"][note_id] = notes.get(note_id) or {
@@ -140,19 +137,9 @@ def build_review_package(
                 "department": None,
             }
 
-        per_type_index: dict[str, int] = {}
-        for event_type, event in _events_from_record(record):
-            seen_events.setdefault(event_type, []).append(event)
-            idx = per_type_index.get(event_type, 0)
-            per_type_index[event_type] = idx + 1
-            patient["events"].append(
-                {
-                    "event_key": f"{note_id}::{event_type}::{idx}",
-                    "event_type": event_type,
-                    "note_id": note_id,
-                    "fields": event,
-                }
-            )
+        for slot in record_to_slots(record, field_schema, state=slot_state):
+            seen_events.setdefault(slot.event_type, []).append(slot.fields)
+            patient["events"].append(slot.as_package_event())
 
     # Backfill schema for any event type present in the data but not the registry.
     field_schema = merge_inferred_schema(field_schema, seen_events)
@@ -161,6 +148,8 @@ def build_review_package(
         "definition_name": definition_name,
         "batch": batch,
         "generated_at": generated_at or _utc_now_iso(),
+        # Comparability gate: two packages are adjudicable only if these match.
+        "adjudication_hash": adjudication_hash(definition_name, field_schema),
         "field_schema": field_schema,
         "patients": list(patients.values()),
     }
@@ -176,12 +165,34 @@ def write_review_package(package: dict[str, Any], output_path: Path) -> Path:
 
 def default_package_path(jsonl_path: Path) -> Path:
     """Where the package lands by default: ``<batch>.review_pkg.json`` beside it."""
-    return jsonl_path.with_name(jsonl_path.stem + _PACKAGE_SUFFIX)
+    return jsonl_path.with_name(_default_package_batch(jsonl_path) + _PACKAGE_SUFFIX)
+
+
+def _default_package_batch(jsonl_path: Path) -> str:
+    stem = jsonl_path.stem
+    if stem.isdigit() and jsonl_path.parent.name:
+        return f"{jsonl_path.parent.name}.{stem}"
+    return stem
 
 
 def _successful_records(jsonl_path: Path) -> list[dict[str, Any]]:
     """Load the success-only records from a batch JSONL (failed rows are noise)."""
-    return [r for r in _load_fc_records(jsonl_path) if r.get("success")]
+    return successful_records_from_jsonl(jsonl_path)
+
+
+def _filter_records_for_review(
+    records: list[dict[str, Any]],
+    *,
+    note_ids: set[str] | None = None,
+    only_flagged: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply package-level report selection before building the review bundle."""
+    selected = records
+    if note_ids is not None:
+        selected = [r for r in selected if note_id_for_record(r) in note_ids]
+    if only_flagged:
+        selected = [r for r in selected if record_has_review_flag(r)]
+    return selected
 
 
 def package_from_jsonl(
@@ -196,6 +207,8 @@ def package_from_jsonl(
     id_col: str = "report_id",
     output_path: Path | None = None,
     generated_at: str | None = None,
+    note_ids: set[str] | None = None,
+    only_flagged: bool = False,
 ) -> Path:
     """Build and write a review package from a batch JSONL.
 
@@ -206,15 +219,23 @@ def package_from_jsonl(
     note text.
     """
     jsonl_path = Path(jsonl_path)
-    records = _successful_records(jsonl_path)
+    records = _filter_records_for_review(
+        _successful_records(jsonl_path),
+        note_ids=note_ids,
+        only_flagged=only_flagged,
+    )
 
     if definition_name is None:
         definition_name = next(
-            (str(r.get("definition_name")) for r in records if r.get("definition_name")),
+            (
+                str(r.get("definition_name"))
+                for r in records
+                if r.get("definition_name")
+            ),
             "",
         )
     if batch is None:
-        batch = jsonl_path.stem
+        batch = _default_package_batch(jsonl_path)
 
     note_ids = {str(r.get("note_id") or "") for r in records}
     notes = load_source_notes(
@@ -231,7 +252,7 @@ def package_from_jsonl(
         # No registry — infer everything from the observed events.
         seen: dict[str, list[dict[str, Any]]] = {}
         for record in records:
-            for event_type, event in _events_from_record(record):
+            for event_type, event in events_from_record(record):
                 seen.setdefault(event_type, []).append(event)
         field_schema = infer_field_schema_from_events(seen)
 
@@ -246,9 +267,7 @@ def package_from_jsonl(
 
     out = Path(output_path) if output_path else default_package_path(jsonl_path)
     write_review_package(package, out)
-    logger.info(
-        "Wrote review package: %s (%d patients)", out, len(package["patients"])
-    )
+    logger.info("Wrote review package: %s (%d patients)", out, len(package["patients"]))
     return out
 
 
@@ -271,6 +290,8 @@ def package_from_batch(
     registry: ToolRegistry | None = None,
     db_path: Path | None = None,
     output_path: Path | None = None,
+    note_ids: set[str] | None = None,
+    only_flagged: bool = False,
 ) -> Path:
     """Build a review package for an already-completed batch.
 
@@ -289,16 +310,21 @@ def package_from_batch(
     source_table = config.get("source_table")
     text_col = config.get("text_col") or "report_text"
     id_col = config.get("id_col") or "report_id"
-    resolved_db = db_path or (Path(config["db_path"]) if config.get("db_path") else None)
+    resolved_db = db_path or (
+        Path(config["db_path"]) if config.get("db_path") else None
+    )
 
     return package_from_jsonl(
         jsonl_path=jsonl_path,
         registry=registry,
-        definition_name=manifest.get("definition_name") or manifest.get("workflow_name"),
+        definition_name=manifest.get("definition_name")
+        or manifest.get("workflow_name"),
         batch=manifest.get("batch_name") or jsonl_path.stem,
         db_path=resolved_db,
         source_table=source_table,
         text_col=text_col,
         id_col=id_col,
         output_path=output_path,
+        note_ids=note_ids,
+        only_flagged=only_flagged,
     )

@@ -36,6 +36,14 @@ _BUILTIN_TOOLS = {
     "finish_single_extraction",
 }
 
+_RUN_REVIEW_PACKAGE_SCOPES = {"all", "flagged", "none"}
+_REVIEW_SELECTION_SCOPES = {
+    "all",
+    "flagged",
+    "disagreements",
+    "flagged-or-disagreements",
+}
+
 
 def _bail(msg: str) -> NoReturn:
     """Print a red error and exit with code 1."""
@@ -140,7 +148,6 @@ def _validate_source_args(
     source: str | None,
     where: str | None,
     cohort: str | None,
-    incremental: bool,
 ) -> None:
     """Validate --jsonl / --source mutual exclusion + jsonl-incompatible flags."""
     if jsonl and source:
@@ -152,8 +159,6 @@ def _validate_source_args(
             _bail("--where is not supported with --jsonl")
         if cohort:
             _bail("--cohort is not supported with --jsonl")
-        if incremental:
-            _bail("--incremental is not supported with --jsonl")
         if not jsonl.exists():
             _bail(f"JSONL file not found: {jsonl}")
 
@@ -161,20 +166,48 @@ def _validate_source_args(
 def _validate_batch_args(
     *,
     batch: str | None,
-    incremental: bool,
+    jsonl: Path | None,
+    full: bool,
     reextract_on_prompt_change: bool,
     force_rerun: Path | None,
 ) -> str:
-    """Validate --batch + incremental-only flags. Returns the validated batch name."""
+    """Validate --batch + delta-refinement flags. Returns the validated batch name.
+
+    The delta is always computed (against the batch's existing segments) for
+    ``--source`` runs; ``--reextract-on-prompt-change`` and ``--force-rerun``
+    refine it, so they only apply there — not in ``--jsonl`` mode (no SQL source
+    to diff) and not with ``--full`` (which ignores prior segments by design).
+    """
     if not batch:
         _bail("--batch is required")
     if not _SAFE_BATCH_NAME.match(batch):
         _bail(f"--batch must be alphanumeric+underscore (got {batch!r})")
-    if reextract_on_prompt_change and not incremental:
-        _bail("--reextract-on-prompt-change requires --incremental")
-    if force_rerun and not incremental:
-        _bail("--force-rerun requires --incremental")
+    if (reextract_on_prompt_change or force_rerun) and jsonl:
+        _bail("--reextract-on-prompt-change / --force-rerun require --source (not --jsonl)")
+    if (reextract_on_prompt_change or force_rerun) and full:
+        _bail("--reextract-on-prompt-change / --force-rerun don't apply with --full")
     return batch
+
+
+def _validate_choice(value: str, *, option: str, choices: set[str]) -> str:
+    normalized = value.strip().lower()
+    if normalized not in choices:
+        _bail(f"{option} must be one of {', '.join(sorted(choices))}")
+    return normalized
+
+
+def _definition_name_from_manifest(jsonl_path: Path) -> str | None:
+    manifest_path = jsonl_path.with_name(jsonl_path.stem + "_manifest.json")
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    definition = manifest.get("definition_name") or manifest.get("workflow_name")
+    return str(definition) if definition else None
 
 
 def _resolve_backend(config, backend_name: str):
@@ -293,83 +326,125 @@ def _resolve_note_id_filter(
 # -----------------------------------------------------------------------------
 
 
-def _next_version_jsonl(inbox_fc_dir: Path, batch: str) -> str:
-    """Return the next ``<batch>.v<N>.jsonl`` filename based on inbox state.
-
-    Scans ``inbox_fc_dir`` for files matching ``<batch>.v<N>.jsonl`` and
-    returns ``<batch>.v<N+1>.jsonl``. If no versioned files exist (only the
-    baseline ``<batch>.jsonl`` is present, or nothing at all), returns
-    ``<batch>.v2.jsonl`` — the baseline is implicitly v1.
-    """
-    pattern = re.compile(rf"^{re.escape(batch)}\.v(\d+)\.jsonl$")
-    highest = 1  # baseline is implicit v1
-    if inbox_fc_dir.exists():
-        for f in inbox_fc_dir.iterdir():
-            m = pattern.match(f.name)
-            if m:
-                highest = max(highest, int(m.group(1)))
-    return f"{batch}.v{highest + 1}.jsonl"
+_DESCRIPTOR_NAME = "batch.json"
 
 
-def _load_baseline_extractions(
-    con: duckdb.DuckDBPyConnection, batch: str
+def _batch_dir(config, batch: str) -> Path:
+    """The inbox folder for a batch: ``inbox/fc_extractions/<batch>/``."""
+    return config.inbox_path / "fc_extractions" / batch
+
+
+def _next_segment(batch_dir: Path) -> int:
+    """Next segment number for a batch = max existing ``NNN`` + 1 (first run → 1)."""
+    from oncai.fc_extraction.load import segment_files
+
+    segs = segment_files(batch_dir)
+    return (segs[-1][0] + 1) if segs else 1
+
+
+def _load_batch_history(
+    batch_dir: Path,
 ) -> dict[str, list[tuple[str | None, str | None]]]:
-    """Load the success-only resume set from ``extractions_raw.<batch>``.
+    """Read the success records across a batch's segments → the resume set.
 
-    Returns a mapping ``record_id -> [(source_content_hash, system_prompt_hash), ...]``.
-    The list-per-id shape preserves every prior version of each record so prompt-
-    change detection can see all hashes that were used. The hash fields are
-    ``None`` for legacy rows produced before those columns existed.
-
-    Raises ``FileNotFoundError`` if the baseline batch table doesn't exist —
-    incremental runs are only meaningful as an extension of an existing baseline.
+    Returns ``{record_id: [(source_content_hash, definition_hash), ...]}`` built
+    directly from the inbox segments — the canonical source of truth — so the
+    incremental delta never depends on the built DuckDB being current. The
+    ``definition_hash`` covers prompt + tool schemas, so a field change shows up
+    as a definition change.
     """
-    baseline_exists = bool(
-        con.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.tables
-            WHERE table_schema = 'extractions_raw' AND table_name = ?
-            """,
-            [batch],
-        ).fetchone()[0]  # type: ignore[index]
-    )
-    if not baseline_exists:
-        raise FileNotFoundError(
-            f"extractions_raw.{batch} not found — run a baseline batch "
-            f"first (without --incremental), then ingest + build-db."
-        )
-
-    # Detect whether the baseline carries the hash columns. Older runs predate
-    # them; the SELECT falls back to NULL so the post-load shape is uniform.
-    cols = con.execute(
-        """
-        SELECT column_name FROM information_schema.columns
-        WHERE table_schema = 'extractions_raw' AND table_name = ?
-        """,
-        [batch],
-    ).fetchall()
-    col_names = {c[0] for c in cols}
-    src_expr = (
-        '"source_content_hash"'
-        if "source_content_hash" in col_names
-        else "CAST(NULL AS VARCHAR)"
-    )
-    prompt_expr = (
-        '"system_prompt_hash"'
-        if "system_prompt_hash" in col_names
-        else "CAST(NULL AS VARCHAR)"
-    )
-    rows = con.execute(
-        f'''SELECT record_id, {src_expr}, {prompt_expr}
-            FROM extractions_raw."{batch}"
-            WHERE success = TRUE
-        '''
-    ).fetchall()
+    from oncai.fc_extraction.load import segment_files
 
     existing: dict[str, list[tuple[str | None, str | None]]] = {}
-    for rid, sh, ph in rows:
-        existing.setdefault(str(rid), []).append((sh, ph))
+    for _, path in segment_files(batch_dir):
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not rec.get("success", False):
+                    continue
+                rid = str(rec.get("note_id", ""))
+                src = rec.get("source_content_hash")
+                run_meta = rec.get("run_meta") or {}
+                # definition_hash (prompt + tool schemas) is the change key;
+                # fall back to the prompt-only hash for records that predate it.
+                defn = run_meta.get("definition_hash") or run_meta.get(
+                    "system_prompt_hash"
+                )
+                existing.setdefault(rid, []).append((src, defn))
     return existing
+
+
+def _read_batch_descriptor(batch_dir: Path) -> dict | None:
+    path = batch_dir / _DESCRIPTOR_NAME
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _check_or_write_batch_descriptor(
+    batch_dir: Path,
+    *,
+    definition: str,
+    source: str | None,
+    id_col: str,
+) -> None:
+    """Pin a batch's identity on first run; assert it matches on every re-run.
+
+    The batch name alone is an unenforced label — without this guard, re-running
+    ``--batch foo`` against a different source or definition would silently merge
+    unrelated records into one table. ``batch.json`` makes the contract explicit.
+    """
+    fields = {"definition": definition, "source": source, "id_col": id_col}
+    desc = _read_batch_descriptor(batch_dir)
+    if desc is None:
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        (batch_dir / _DESCRIPTOR_NAME).write_text(json.dumps(fields, indent=2))
+        return
+    mismatches = [
+        f"{k}: batch={desc.get(k)!r} vs this run={fields[k]!r}"
+        for k in fields
+        if desc.get(k) != fields[k]
+    ]
+    if mismatches:
+        _bail(
+            f"--batch {batch_dir.name!r} was created with different parameters:\n  "
+            + "\n  ".join(mismatches)
+            + "\nUse a new --batch name, or match the original parameters."
+        )
+
+
+def _finalize_segment(working_jsonl: Path, batch_dir: Path, seg: int) -> Path:
+    """Promote a completed working JSONL into the inbox batch folder as NNN.jsonl.
+
+    A run extracts into ``fc_outputs/`` (resumable scratch); on success the
+    segment is promoted into ``inbox/fc_extractions/<batch>/NNN.jsonl`` via a
+    temp-then-rename so a partial file never appears under the final name. The
+    sibling ``NNN_manifest.json`` is promoted alongside it.
+    """
+    import shutil
+
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    final = batch_dir / f"{seg:03d}.jsonl"
+    tmp = batch_dir / f"{seg:03d}.jsonl.tmp"
+    shutil.copy2(working_jsonl, tmp)
+    tmp.replace(final)
+
+    work_manifest = working_jsonl.with_name(working_jsonl.stem + "_manifest.json")
+    if work_manifest.exists():
+        man_final = batch_dir / f"{seg:03d}_manifest.json"
+        man_tmp = batch_dir / f"{seg:03d}_manifest.json.tmp"
+        shutil.copy2(work_manifest, man_tmp)
+        man_tmp.replace(man_final)
+    return final
 
 
 def _query_source_state(
@@ -415,20 +490,21 @@ def _categorize_delta(
     source_rows: list[tuple[Any, Any]],
     existing: dict[str, list[tuple[str | None, str | None]]],
     note_id_set: set[str] | None,
-    system_prompt_hash: str,
+    definition_hash: str,
     reextract_on_prompt_change: bool,
     forced_rerun_ids: set[str] | None,
 ) -> tuple[set[str], dict[str, int], set[str]]:
-    """Bucket each source row into new / changed / prompt_changed / forced / skipped.
+    """Bucket each source row into new / changed / definition_changed / forced / skipped.
 
     The categorization for a given ``record_id``:
-      - **new**: id not in the baseline at all.
-      - **changed**: id is in baseline but no prior row matches the current
+      - **new**: id not in the history at all.
+      - **changed**: id is in history but no prior row matches the current
         content_hash (i.e. an addendum / content edit).
-      - **prompt_changed**: id matches a baseline content_hash but none of the
-        matching rows used the current ``system_prompt_hash``. Only counted
-        when ``reextract_on_prompt_change`` is set.
-      - **forced**: id would otherwise be skipped (hash + prompt match, or
+      - **definition_changed**: id matches a prior content_hash but none of the
+        matching rows used the current ``definition_hash`` (prompt + tool
+        schemas) — i.e. the prompt or a tool's fields changed. Only counted when
+        ``reextract_on_prompt_change`` is set.
+      - **forced**: id would otherwise be skipped (hash + definition match, or
         legacy row with no hash), but the caller explicitly listed it in
         ``forced_rerun_ids``.
       - **skipped**: id matches a prior extraction and the caller didn't
@@ -441,7 +517,7 @@ def _categorize_delta(
     """
     new_ids: set[str] = set()
     changed_ids: set[str] = set()
-    prompt_changed_ids: set[str] = set()
+    definition_changed_ids: set[str] = set()
     forced_ids: set[str] = set()
     skipped = 0
 
@@ -476,25 +552,25 @@ def _categorize_delta(
             continue
 
         if reextract_on_prompt_change and not any(
-            p[1] == system_prompt_hash for p in matching_hash
+            p[1] == definition_hash for p in matching_hash
         ):
-            prompt_changed_ids.add(nid)
+            definition_changed_ids.add(nid)
             continue
 
-        # Hash + (optionally) prompt match: would be skipped, unless forced.
+        # Hash + (optionally) definition match: would be skipped, unless forced.
         if nid in forced_set:
             forced_ids.add(nid)
         else:
             skipped += 1
 
-    delta = new_ids | changed_ids | prompt_changed_ids | forced_ids
+    delta = new_ids | changed_ids | definition_changed_ids | forced_ids
     forced_missing = forced_set - forced_seen
     return (
         delta,
         {
             "new": len(new_ids),
             "changed": len(changed_ids),
-            "prompt_changed": len(prompt_changed_ids),
+            "definition_changed": len(definition_changed_ids),
             "forced": len(forced_ids),
             "skipped": skipped,
         },
@@ -502,137 +578,51 @@ def _categorize_delta(
     )
 
 
-def _compute_incremental_delta(
+def _compute_delta(
     *,
-    db_path: Path,
-    source_table: str,
+    config,
+    batch_dir: Path,
+    source: str,
     id_col: str,
     note_id_set: set[str] | None,
     where: str | None,
-    batch: str,
-    system_prompt_hash: str,
+    definition_hash: str,
     reextract_on_prompt_change: bool,
-    forced_rerun_ids: set[str] | None = None,
+    force_rerun: Path | None,
 ) -> tuple[set[str], dict[str, int], set[str]]:
-    """Compute the source IDs that need extraction for a batch-pinned run.
+    """Which source ids need extraction, vs the batch's existing inbox segments.
 
-    Reads the resume set from ``extractions_raw.<batch>`` (success-only),
-    queries the source table for current ``(id_col, content_hash)``, and
-    anti-joins to find new + changed + (when requested) prompt-changed rows.
+    History (already-extracted ids + their source/definition hashes) comes from
+    the inbox segments — the canonical source of truth, so the delta is correct
+    without a ``build-db`` first. Current source state comes from the DuckDB
+    source table. Buckets each id into new / changed / definition_changed /
+    forced / skipped.
 
-    ``forced_rerun_ids`` adds any ids that would otherwise be skipped into a
-    ``forced`` bucket (already-extracted but the user wants to redo them).
-    Forced ids constrained out by ``note_id_set`` / ``where`` won't appear in
-    the source query and are returned as ``forced_missing`` for warning.
-
-    Errors out if ``extractions_raw.<batch>`` doesn't exist — incremental is
-    only meaningful as an extension of an existing baseline batch.
-
-    Returns:
-        (delta_id_set, counts, forced_missing_ids) where counts has keys
-        ``new``, ``changed``, ``prompt_changed``, ``forced``, ``skipped``.
+    Returns ``(delta_id_set, counts, forced_missing_ids)``.
     """
     import duckdb
 
-    if not _SAFE_BATCH_NAME.match(batch):
-        raise ValueError(
-            f"--batch must be alphanumeric+underscore for incremental: {batch!r}"
-        )
+    from ._shared import load_id_filter
 
-    con = duckdb.connect(str(db_path), read_only=True)
+    forced_rerun_ids = (
+        load_id_filter(force_rerun, id_col=id_col) if force_rerun else None
+    )
+
+    history = _load_batch_history(batch_dir)
+    con = duckdb.connect(str(config.db_path), read_only=True)
     try:
-        existing = _load_baseline_extractions(con, batch)
-        source_rows = _query_source_state(con, source_table, id_col, where)
+        source_rows = _query_source_state(con, source, id_col, where)
     finally:
         con.close()
 
     return _categorize_delta(
         source_rows=source_rows,
-        existing=existing,
+        existing=history,
         note_id_set=note_id_set,
-        system_prompt_hash=system_prompt_hash,
+        definition_hash=definition_hash,
         reextract_on_prompt_change=reextract_on_prompt_change,
         forced_rerun_ids=forced_rerun_ids,
     )
-
-
-def _run_incremental_step(
-    *,
-    config,
-    note_config,
-    batch: str,
-    source: str,
-    id_col: str,
-    note_id_set: set[str] | None,
-    where: str | None,
-    reextract_on_prompt_change: bool,
-    force_rerun: Path | None,
-) -> tuple[set[str], str] | None:
-    """Run the incremental delta + output-name-bump step.
-
-    ``source`` is required (incremental needs a DuckDB source table — it is
-    mutually exclusive with ``--jsonl``, enforced upstream by
-    ``_validate_source_args``).
-
-    Returns ``(new_note_id_set, output_batch_name)``, or ``None`` if the delta
-    is empty (caller should treat as nothing-to-do and bail cleanly).
-    """
-    from oncai.fc_extraction.manifest import hash_string
-
-    from ._shared import load_id_filter
-
-    forced_rerun_ids: set[str] | None = None
-    if force_rerun:
-        forced_rerun_ids = load_id_filter(force_rerun, id_col=id_col)
-        console.print(
-            f"  Force-rerun:   {len(forced_rerun_ids):,} {id_col}(s) "
-            f"from {force_rerun.name}"
-        )
-
-    sys_prompt_hash = hash_string(note_config.system_prompt)
-    try:
-        delta, counts, forced_missing = _compute_incremental_delta(
-            db_path=config.db_path,
-            source_table=source,
-            id_col=id_col,
-            note_id_set=note_id_set,
-            where=where,
-            batch=batch,
-            system_prompt_hash=sys_prompt_hash,
-            reextract_on_prompt_change=reextract_on_prompt_change,
-            forced_rerun_ids=forced_rerun_ids,
-        )
-    except FileNotFoundError as e:
-        _bail(str(e))
-
-    console.print(
-        f"[blue]Incremental delta:[/blue] {counts['new']} new + "
-        f"{counts['changed']} changed (addenda) + "
-        f"{counts['prompt_changed']} prompt-changed + "
-        f"{counts['forced']} forced; "
-        f"skipping {counts['skipped']} already-extracted"
-    )
-    if forced_missing:
-        preview = ", ".join(sorted(forced_missing)[:10])
-        extra = (
-            f" (and {len(forced_missing) - 10} more)"
-            if len(forced_missing) > 10
-            else ""
-        )
-        console.print(
-            f"[yellow]Warning:[/yellow] {len(forced_missing)} "
-            f"force-rerun id(s) not present in source query result "
-            f"(check --cohort/--id-file/--where scope, or that the id "
-            f"exists in {source}): {preview}{extra}"
-        )
-    if not delta:
-        return None
-
-    inbox_fc_dir = config.inbox_path / "fc_extractions"
-    next_name = _next_version_jsonl(inbox_fc_dir, batch)
-    output_batch_name = next_name.removesuffix(".jsonl")
-    console.print(f"  Output batch:  {output_batch_name}.jsonl")
-    return delta, output_batch_name
 
 
 # -----------------------------------------------------------------------------
@@ -726,10 +716,10 @@ def _prelog_run(
     top_k: int | None,
     mrn_source: str,
 ) -> str | None:
-    """Write a "started" entry to lake/runs/. Returns run_id, or None on failure.
+    """Write a "started" manifest to inbox/runs/. Returns run_id, or None on failure.
 
     Failures here are logged as warnings rather than aborting — losing the run
-    log is unfortunate but shouldn't kill an otherwise-good batch.
+    manifest is unfortunate but shouldn't kill an otherwise-good batch.
     """
     from oncai.fc_extraction import FCBackend
 
@@ -740,7 +730,7 @@ def _prelog_run(
             _get_code_version,
             _get_git_info,
             _hash_string,
-            log_run,
+            start_run,
         )
 
         git_info = _get_git_info()
@@ -783,7 +773,7 @@ def _prelog_run(
             db_path=str(jsonl) if jsonl else str(config.db_path),
             mrn_source=mrn_source,
         )
-        log_run(run, config.lake_path)
+        start_run(run, config.inbox_path)
     except Exception as e:
         console.print(f"  [yellow]Warning: failed to pre-log run: {e}[/yellow]")
         return None
@@ -796,18 +786,33 @@ def _build_review_package_for_run(
     note_config,
     registry,
     output_path: str,
+    inbox_path: Path,
+    batch: str,
     source: str | None,
     jsonl: Path | None,
     db_path: Path,
     text_col: str,
     id_col: str,
+    review_package_scope: str,
 ) -> None:
     """Build the ``*.review_pkg.json`` for a just-completed batch.
+
+    Lands the package in ``inbox/fc_reviews/<batch>/`` (created idempotently) so
+    the reviewer's completed ``<segment>.reviews.jsonl`` has an obvious folder to
+    drop back into — mirroring ``inbox/fc_extractions/<batch>/``.
 
     Best-effort: a packaging failure is reported in yellow but never fails the
     run — the extraction JSONL is the source of truth and is already on disk.
     """
     from oncai.review import package_from_jsonl
+
+    scope = _validate_choice(
+        review_package_scope,
+        option="--review-package",
+        choices=_RUN_REVIEW_PACKAGE_SCOPES,
+    )
+    if scope == "none":
+        return
 
     try:
         if jsonl is not None:
@@ -816,6 +821,9 @@ def _build_review_package_for_run(
         else:
             source_table = source
             notes_db = db_path
+        pkg_dir = inbox_path / "fc_reviews" / batch
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        dest = pkg_dir / f"{Path(output_path).stem}.review_pkg.json"
         pkg_path = package_from_jsonl(
             jsonl_path=Path(output_path),
             registry=registry,
@@ -824,34 +832,40 @@ def _build_review_package_for_run(
             db_path=notes_db,
             text_col=text_col,
             id_col=id_col,
+            output_path=dest,
+            only_flagged=scope == "flagged",
         )
     except Exception as e:
         console.print(f"  [yellow]Warning: failed to build review package: {e}[/yellow]")
     else:
         console.print(f"  Review package: {pkg_path}")
+        console.print(
+            f"  [dim]→ when reviewed, drop {Path(output_path).stem}.reviews.jsonl "
+            f"into {pkg_dir}[/dim]"
+        )
 
 
 def _finalize_run(
     *,
     run_id: str | None,
-    lake_path: Path,
+    inbox_path: Path,
     t0: float,
     status: str,
     **extra: Any,
 ) -> None:
-    """Update an in-flight run log with terminal status + any result fields.
+    """Fill in the terminal sections of a run's manifest (status + results).
 
     Silently swallows logging failures so the user-facing flow isn't affected
-    when the runs parquet has a problem.
+    when the run manifest has a problem.
     """
     if not run_id:
         return
     try:
-        from oncai.runs import update_run
+        from oncai.runs import complete_run
 
-        update_run(
+        complete_run(
             run_id,
-            lake_path,
+            inbox_path,
             status=status,
             completed_at=datetime.now(timezone.utc).isoformat(),
             duration_seconds=round(time.monotonic() - t0, 2),
@@ -873,9 +887,9 @@ def fc_run_single(
     batch: str | None = typer.Option(
         None,
         "--batch",
-        help="Batch name for this run. Required. With --incremental, this "
-        "pins to the existing extractions_raw.<batch> baseline; the actual "
-        "output JSONL is auto-bumped to <batch>.v<N>.jsonl.",
+        help="Batch name. Required. A batch is a folder of numbered segments "
+        "(inbox/fc_extractions/<batch>/NNN.jsonl); each run appends the next "
+        "segment with only the new/changed rows.",
     ),
     source: str | None = typer.Option(
         None,
@@ -887,7 +901,7 @@ def fc_run_single(
         None,
         "--jsonl",
         help="JSONL file to load notes from (one JSON object per line). "
-        "Skips DuckDB entirely; incompatible with --source/--where/--cohort/--incremental.",
+        "Skips DuckDB entirely; incompatible with --source/--where/--cohort.",
     ),
     text_col: str = typer.Option(
         "report_text", "--text-col", help="Column/JSON key containing the row's text"
@@ -949,24 +963,30 @@ def fc_run_single(
         help="Drop previously-failed records and retry just those notes. "
         "Backs up the original JSONL to <name>.jsonl.bak.",
     ),
-    incremental: bool = typer.Option(
+    full: bool = typer.Option(
         False,
-        "--incremental",
-        help="Pin to an existing baseline batch and run only on rows that "
-        "aren't yet in extractions_raw.<batch> (or whose source content_hash "
-        "differs). Output goes to fc_outputs/<DefinitionName>/<batch>.v<N>.jsonl.",
+        "--full",
+        help="Re-extract every matching row into a new segment, ignoring what "
+        "the batch's existing segments already cover. The default is "
+        "incremental: only rows new or changed since the existing segments.",
+    ),
+    scratch: bool = typer.Option(
+        False,
+        "--scratch",
+        help="One-off test run: extract to fc_outputs only and do NOT promote a "
+        "segment into the inbox (no batch.json, no run log). Runs fresh each "
+        "time; inspect the output with `oncai fc peek`.",
     ),
     reextract_on_prompt_change: bool = typer.Option(
         False,
         "--reextract-on-prompt-change",
-        help="When --incremental is set, also re-extract rows whose "
-        "system_prompt_hash differs from the current definition's prompt.",
+        help="Also re-extract rows whose definition_hash differs — i.e. the "
+        "prompt OR a tool's Pydantic fields/enums changed (--source runs only).",
     ),
     force_rerun: Path | None = typer.Option(
         None,
         "--force-rerun",
-        help="CSV of report_ids to force-rerun even if their hash matches "
-        "the baseline. Requires --incremental.",
+        help="CSV of ids to re-extract even if unchanged (--source runs only).",
     ),
     rate_limit: float = typer.Option(
         1.0,
@@ -981,6 +1001,14 @@ def fc_run_single(
         False,
         "--debug",
         help="Save full request/response JSON for each API call to fc_debug/",
+    ),
+    review_package: str = typer.Option(
+        "flagged",
+        "--review-package",
+        help=(
+            "Review package to build after the run: flagged, all, or none. "
+            "flagged includes only reports that called flag_report_for_review."
+        ),
     ),
     log_level: str = typer.Option(
         "warning", "--log-level", "-l", help="Extraction log level"
@@ -1006,13 +1034,18 @@ def fc_run_single(
         source=source,
         where=where,
         cohort=cohort,
-        incremental=incremental,
     )
     batch = _validate_batch_args(
         batch=batch,
-        incremental=incremental,
+        jsonl=jsonl,
+        full=full,
         reextract_on_prompt_change=reextract_on_prompt_change,
         force_rerun=force_rerun,
+    )
+    review_package = _validate_choice(
+        review_package,
+        option="--review-package",
+        choices=_RUN_REVIEW_PACKAGE_SCOPES,
     )
     backend_cfg, backend_enum = _resolve_backend(config, backend)
 
@@ -1049,29 +1082,74 @@ def fc_run_single(
         console.print("Run 'oncai build-db' first.")
         raise typer.Exit(1)
 
-    # ---- incremental delta (optional) ---------------------------------------
-    output_batch_name = batch
-    if incremental:
-        # _validate_source_args enforces (jsonl XOR source) and forbids
-        # incremental + jsonl; therefore source is non-None here. This guard
-        # is for the type-checker; should be unreachable at runtime.
-        if source is None:
-            raise RuntimeError("incremental requires --source")
-        step = _run_incremental_step(
+    # ---- batch folder + identity guard --------------------------------------
+    batch_dir = _batch_dir(config, batch)
+    output_dir = config.lake_path.parent / "fc_outputs"
+    if not scratch:
+        _check_or_write_batch_descriptor(
+            batch_dir,
+            definition=note_config.name,
+            source=source if jsonl is None else f"jsonl:{jsonl.name}",
+            id_col=id_col,
+        )
+
+    # ---- delta (skipped for --full, --jsonl, and --scratch: extract all) -----
+    if jsonl is None and not full and not scratch:
+        if source is None:  # _validate_source_args guarantees this; type guard
+            raise RuntimeError("a --source is required without --jsonl")
+        from oncai.fc_extraction.manifest import definition_hash_from_registry
+
+        delta, counts, forced_missing = _compute_delta(
             config=config,
-            note_config=note_config,
-            batch=batch,
+            batch_dir=batch_dir,
             source=source,
             id_col=id_col,
             note_id_set=note_id_set,
             where=where,
+            definition_hash=definition_hash_from_registry(
+                note_config.system_prompt, registry
+            ),
             reextract_on_prompt_change=reextract_on_prompt_change,
             force_rerun=force_rerun,
         )
-        if step is None:
-            console.print("[green]Nothing to extract — all up to date.[/green]")
+        console.print(
+            f"[blue]Delta:[/blue] {counts['new']} new + {counts['changed']} changed "
+            f"+ {counts['definition_changed']} definition-changed "
+            f"+ {counts['forced']} forced; "
+            f"skipping {counts['skipped']} already-extracted"
+        )
+        if forced_missing:
+            preview = ", ".join(sorted(forced_missing)[:10])
+            console.print(
+                f"[yellow]Warning:[/yellow] {len(forced_missing)} force-rerun id(s) "
+                f"not in the source scope (check --where/--id-file or {source}): "
+                f"{preview}"
+            )
+        if not delta:
+            console.print("[green]Nothing to extract — batch is up to date.[/green]")
             return
-        note_id_set, output_batch_name = step
+        note_id_set = delta
+
+    # ---- choose the output target -------------------------------------------
+    if scratch:
+        # One-off: a fixed scratch name, started fresh each run (so a prompt /
+        # definition edit isn't masked by resumed records), never promoted.
+        run_label = f"{batch}.scratch"
+        scratch_jsonl = output_dir / note_config.name / f"{run_label}.jsonl"
+        scratch_jsonl.unlink(missing_ok=True)
+        scratch_jsonl.with_name(scratch_jsonl.stem + "_manifest.json").unlink(
+            missing_ok=True
+        )
+        console.print(
+            "  [yellow]Scratch run[/yellow] — output stays in fc_outputs, "
+            "not promoted to the inbox."
+        )
+    else:
+        seg = _next_segment(batch_dir)
+        run_label = f"{batch}.{seg:03d}"
+        console.print(
+            f"  Segment:    {seg:03d}  →  inbox/fc_extractions/{batch}/{seg:03d}.jsonl"
+        )
 
     # ---- client + run logging ------------------------------------------------
     fc_client = _build_fc_client(
@@ -1090,30 +1168,36 @@ def fc_run_single(
 
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
-    run_id = _prelog_run(
-        config=config,
-        note_config=note_config,
-        registry=registry,
-        fc_client=fc_client,
-        backend_name=backend,
-        backend_enum=backend_enum,
-        batch_name=output_batch_name,
-        started_at=started_at,
-        source=source,
-        jsonl=jsonl,
-        text_col=text_col,
-        workers=workers,
-        reasoning_effort=reasoning_effort,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        mrn_source=_describe_mrn_source(id_file=id_file, cohort=cohort, limit=limit),
+    # Scratch runs leave no trace in the canonical run log.
+    run_id = (
+        None
+        if scratch
+        else _prelog_run(
+            config=config,
+            note_config=note_config,
+            registry=registry,
+            fc_client=fc_client,
+            backend_name=backend,
+            backend_enum=backend_enum,
+            batch_name=run_label,
+            started_at=started_at,
+            source=source,
+            jsonl=jsonl,
+            text_col=text_col,
+            workers=workers,
+            reasoning_effort=reasoning_effort,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            mrn_source=_describe_mrn_source(
+                id_file=id_file, cohort=cohort, limit=limit
+            ),
+        )
     )
 
-    # ---- run the batch -------------------------------------------------------
+    # ---- run the batch (working JSONL in fc_outputs scratch) -----------------
     from oncai.fc_extraction.batch_single import run_fc_single_batch
 
-    output_dir = config.lake_path.parent / "fc_outputs"
     try:
         result = run_fc_single_batch(
             registry=registry,
@@ -1122,13 +1206,13 @@ def fc_run_single(
             db_path=config.db_path if not jsonl else None,
             source_table=source,
             output_dir=output_dir,
-            batch_name=output_batch_name,
+            batch_name=run_label,
             text_col=text_col,
             id_col=id_col,
             limit=limit,
             where=where,
             note_ids=note_id_set,
-            resume=not no_resume,
+            resume=(not no_resume) and not scratch,
             retry_failed=retry_failed,
             rate_limit=rate_limit,
             workers=workers,
@@ -1137,17 +1221,29 @@ def fc_run_single(
         )
     except KeyboardInterrupt:
         _finalize_run(
-            run_id=run_id, lake_path=config.lake_path, t0=t0, status="cancelled"
+            run_id=run_id, inbox_path=config.inbox_path, t0=t0, status="cancelled"
         )
         console.print("\n[yellow]Run cancelled by user.[/yellow]")
         raise typer.Exit(1) from None
     except Exception:
-        _finalize_run(run_id=run_id, lake_path=config.lake_path, t0=t0, status="failed")
+        _finalize_run(
+            run_id=run_id, inbox_path=config.inbox_path, t0=t0, status="failed"
+        )
         raise
+
+    # ---- scratch: stop here, nothing touches the inbox -----------------------
+    if scratch:
+        console.print(f"\n[green]✓[/green] {result}")
+        console.print(f"  Scratch output (not promoted): {result.output_path}")
+        console.print(f"  Peek it:  oncai fc peek {result.output_path}")
+        return
+
+    # ---- promote the working JSONL into the inbox batch folder ---------------
+    segment_path = _finalize_segment(Path(result.output_path), batch_dir, seg)
 
     _finalize_run(
         run_id=run_id,
-        lake_path=config.lake_path,
+        inbox_path=config.inbox_path,
         t0=t0,
         status="completed",
         input_count=result.total_notes,
@@ -1157,23 +1253,26 @@ def fc_run_single(
         items_skipped=result.skipped,
         total_input_tokens=result.total_input_tokens,
         total_output_tokens=result.total_output_tokens,
-        output_path=result.output_path,
+        output_path=str(segment_path),
     )
 
     console.print(f"\n[green]✓[/green] {result}")
-    console.print(f"  Output: {result.output_path}")
+    console.print(f"  Segment: {segment_path}")
 
-    # Build a physician-review package next to the batch JSONL so a completed
-    # run is immediately review-ready (open it in the oncai review app).
+    # Build a physician-review package from the just-written segment so a
+    # completed run is immediately review-ready (open it in the oncai review app).
     _build_review_package_for_run(
         note_config=note_config,
         registry=registry,
         output_path=result.output_path,
+        inbox_path=config.inbox_path,
+        batch=batch,
         source=source,
         jsonl=jsonl,
         db_path=config.db_path,
         text_col=text_col,
         id_col=id_col,
+        review_package_scope=review_package,
     )
 
 
@@ -1199,6 +1298,30 @@ def fc_review_package(
         help="Where to write the .review_pkg.json "
         "(default: <batch>.review_pkg.json beside the JSONL).",
     ),
+    scope: str = typer.Option(
+        "all",
+        "--scope",
+        help=(
+            "Which reports to package: all, flagged, disagreements, or "
+            "flagged-or-disagreements."
+        ),
+    ),
+    compare_with: list[Path] | None = typer.Option(
+        None,
+        "--compare-with",
+        help=(
+            "Additional batch JSONL to compare against the primary batch. "
+            "Use multiple times with --scope disagreements."
+        ),
+    ),
+    agreement_ignore_field: list[str] | None = typer.Option(
+        None,
+        "--agreement-ignore-field",
+        help=(
+            "Field ignored when comparing runs. Defaults to comment. "
+            "Use multiple times."
+        ),
+    ),
     db: Path | None = typer.Option(
         None,
         "--db",
@@ -1214,16 +1337,60 @@ def fc_review_package(
     Examples:
         oncai fc review-package fc_outputs/PathKidneyBasic/v1.jsonl
         oncai fc review-package fc_outputs/PathKidneyBasic/v1.jsonl -d path_kidney_basic
+        oncai fc review-package run_a.jsonl --scope disagreements --compare-with run_b.jsonl
     """
-    from oncai.review import package_from_batch
+    from oncai.review import build_field_schema, package_from_batch
+    from oncai.review.select import (
+        DEFAULT_AGREEMENT_IGNORE_FIELDS,
+        comparable_fields_from_field_schema,
+        disagreement_note_ids,
+        flagged_note_ids_from_jsonl,
+    )
 
     if not batch.exists():
         _bail(f"Batch JSONL not found: {batch}")
+    scope = _validate_choice(
+        scope,
+        option="--scope",
+        choices=_REVIEW_SELECTION_SCOPES,
+    )
+    compare_paths = compare_with or []
+    for path in compare_paths:
+        if not path.exists():
+            _bail(f"Comparison batch JSONL not found: {path}")
+    if scope in {"disagreements", "flagged-or-disagreements"} and not compare_paths:
+        _bail(f"--scope {scope} requires at least one --compare-with JSONL")
 
     config = get_config()
     registry = None
+    definition_to_load = definition or _definition_name_from_manifest(batch)
     if definition is not None:
         _, registry = _load_definition(definition)
+    elif (
+        definition_to_load is not None
+        and _resolve_definition_name(definition_to_load) is not None
+    ):
+        _, registry = _load_definition(definition_to_load)
+
+    selected_note_ids: set[str] | None = None
+    only_flagged = False
+    if scope == "flagged":
+        only_flagged = True
+    elif scope in {"disagreements", "flagged-or-disagreements"}:
+        ignored = agreement_ignore_field or list(DEFAULT_AGREEMENT_IGNORE_FIELDS)
+        comparable_fields = (
+            comparable_fields_from_field_schema(build_field_schema(registry))
+            if registry is not None
+            else None
+        )
+        selected_note_ids = disagreement_note_ids(
+            batch,
+            compare_paths,
+            ignore_fields=ignored,
+            comparable_fields=comparable_fields,
+        )
+        if scope == "flagged-or-disagreements":
+            selected_note_ids |= flagged_note_ids_from_jsonl(batch)
 
     db_path = db or config.db_path
     try:
@@ -1232,39 +1399,48 @@ def fc_review_package(
             registry=registry,
             db_path=db_path if db_path.exists() else None,
             output_path=output,
+            note_ids=selected_note_ids,
+            only_flagged=only_flagged,
         )
     except FileNotFoundError as e:
         _bail(str(e))
 
     console.print(f"[green]✓[/green] Wrote review package: {pkg_path}")
+    if scope != "all":
+        selected_label = (
+            "flagged reports"
+            if scope == "flagged"
+            else f"{len(selected_note_ids or set())} selected report(s)"
+        )
+        console.print(f"  Scope: {scope} ({selected_label})")
     console.print(
         "  Open it in the oncai review app "
-        "(review_app_reference/server.py --package <file>)."
+        "(apps/review_app/server.py --package <file>)."
     )
 
 
-@fc_app.command(name="unstage")
-def fc_unstage(
+@fc_app.command(name="unpeek")
+def fc_unpeek(
     batch: str = typer.Argument(
         ...,
-        help="Batch stem to unstage (drops extractions_staging.<batch>). "
-        "Pass --all to drop the whole staging schema.",
+        help="Scratch table stem to drop (scratch.<batch>). "
+        "Pass --all to drop the whole scratch schema.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
-    all: bool = typer.Option(False, "--all", help="Drop all staged tables"),
+    all: bool = typer.Option(False, "--all", help="Drop all scratch tables"),
 ):
     """
-    Drop a staged table from the ``extractions_staging`` schema.
+    Drop a table from the throwaway ``scratch`` schema (the ``fc peek`` target).
 
     Examples:
-        oncai fc unstage path_basic_v3
-        oncai fc unstage path_basic_v3 --yes
-        oncai fc unstage IGNORED --all          # drops every staged table
+        oncai fc unpeek path_basic_v3
+        oncai fc unpeek path_basic_v3 --yes
+        oncai fc unpeek IGNORED --all          # drops every scratch table
     """
     import duckdb
 
     config = get_config()
-    schema_name = "extractions_staging"
+    schema_name = "scratch"
 
     if not config.db_path.exists():
         _bail(f"Database not found: {config.db_path}")
@@ -1446,27 +1622,27 @@ def fc_manifest(
     )
 
 
-@fc_app.command(name="stage")
-def fc_stage(
-    jsonl_path: Path = typer.Argument(..., help="Path to JSONL file to stage"),
+@fc_app.command(name="peek")
+def fc_peek(
+    jsonl_path: Path = typer.Argument(..., help="Path to a JSONL file to peek at"),
     skip_failed: bool = typer.Option(
         True, "--skip-failed/--include-failed", help="Skip failed extractions"
     ),
     replace: bool = typer.Option(
-        False, "--replace", help="Replace existing staging table instead of appending"
+        False, "--replace", help="Replace existing scratch table instead of appending"
     ),
 ):
     """
-    Stage FC extraction results into DuckDB for quick exploration.
+    Load FC extraction results into a throwaway ``scratch`` DuckDB schema for a
+    quick SQL look — handy for eyeballing a segment before you ingest it.
 
-    Lands at ``extractions_staging.<jsonl_stem>``.
-
-    Drop one staged table with ``oncai fc unstage <stem>``, or all staged
-    tables with ``oncai fc unstage --all``.
+    Lands at ``scratch.<jsonl_stem>``. The scratch schema is disposable by
+    design: a ``build-db`` clears it. Drop one peeked table with
+    ``oncai fc unpeek <stem>``, or all of them with ``oncai fc unpeek --all``.
 
     Examples:
-        oncai fc stage fc_outputs/PathKidneyBasic/path_basic_v3.jsonl
-            → extractions_staging.path_basic_v3
+        oncai fc peek fc_outputs/PathKidneyBasic/path_basic_v3.jsonl
+            → scratch.path_basic_v3
     """
     import tempfile
 
@@ -1507,10 +1683,10 @@ def fc_stage(
             tmp.write(json.dumps(row, default=str) + "\n")
         tmp_path = tmp.name
 
-    schema_name = "extractions_staging"
+    schema_name = "scratch"
     table_name = jsonl_path.stem
 
-    console.print("[blue]Staging FC extractions into DuckDB[/blue]")
+    console.print("[blue]Peeking at FC extractions in DuckDB[/blue]")
     console.print(f"  Source:  {jsonl_path}")
     console.print(f"  Table:   {schema_name}.{table_name}")
     console.print(f"  Records: {len(records)} notes ({skipped} failed skipped)")
@@ -1531,6 +1707,6 @@ def fc_stage(
         Path(tmp_path).unlink(missing_ok=True)
 
     console.print(
-        f"\n[green]✓[/green] Staged {row_count} rows into {schema_name}.{table_name}"
+        f"\n[green]✓[/green] Loaded {row_count} rows into {schema_name}.{table_name}"
     )
     console.print(f"  Query:   SELECT * FROM {schema_name}.{table_name} LIMIT 10")

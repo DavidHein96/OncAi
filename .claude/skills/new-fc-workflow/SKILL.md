@@ -79,12 +79,18 @@ uv run ruff check src/oncai         # must be clean
 uv run ty check src/oncai           # must be clean
 ```
 
-Tell the user how to dry-run their workflow once the lake has data:
+Tell the user how to test their workflow once the lake has data. Use
+`--scratch` so a test run stays in `fc_outputs/` and never promotes a segment
+into the inbox (no `batch.json`, no run log); `fc peek` it for a quick SQL look:
 
 ```bash
-oncai fc run-single <short_name> --batch v1 \
-    --source raw.pathology --backend <their_backend> --limit 5
+oncai fc run-single <short_name> --batch test \
+    --source raw.pathology --backend <their_backend> --limit 5 --scratch
+oncai fc peek fc_outputs/<DefinitionName>/test.scratch.jsonl
 ```
+
+Drop `--scratch` for a real run: it promotes the next segment to
+`inbox/fc_extractions/<batch>/NNN.jsonl`, ready for `oncai ingest fc_extractions`.
 
 ## What NOT to do
 

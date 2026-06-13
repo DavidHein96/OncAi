@@ -1,6 +1,6 @@
 """Build the review app's ``field_schema`` from extraction tool models.
 
-The physician review app (``review_app_reference/``) renders one editable card
+The physician review app (``apps/review_app/``) renders one editable card
 per extracted event. To know *how* to render each field — a dropdown for an
 enum, a date widget for an :class:`~oncai.fc_extraction.models.ApproxDate`, a
 checkbox for a bool — it reads a ``field_schema`` map keyed by ``event_type``
@@ -21,8 +21,14 @@ checkbox for a bool — it reads a ``field_schema`` map keyed by ``event_type``
     }
 
 The ``control`` values mirror exactly what ``web/app.js`` switches on:
-``enum``, ``approx_date``, ``number``, ``bool``, ``evidence_verbatim``,
-``readonly``, and the default free-text ``text`` (rendered as a textarea).
+``enum``, ``approx_date``, ``number``, ``bool``, ``readonly``, and the default
+free-text ``text`` (rendered as a textarea). Source-note anchors are carried by
+reserved event fields (``evidence`` and ``review_anchor``), not editable schema
+fields.
+``event_identity_fields`` is optional metadata used by discrepancy review to
+align repeated calls of the same event tool across runs before comparing fields.
+``comparison_fields`` is the explicit opt-in list of fields to compare after
+alignment; fields not listed are context-only for disagreement selection.
 
 Two entry points:
 
@@ -39,10 +45,15 @@ Two entry points:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from oncai.fc_extraction.models import ExtractionPlan
 from oncai.fc_extraction.tools import _inline_refs
+
+from .select import NORMALIZATION_VERSION
+from .slots import PROVENANCE_FIELD_NAMES
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -58,7 +69,7 @@ _BUILTIN_TOOLS = {
 
 # Fields present on every ExtractionEvent that we don't render as an editable
 # row: note_id is shown as a header chip instead (see app.js renderCard).
-_SKIP_FIELDS = {"note_id"}
+_SKIP_FIELDS = {"note_id", *PROVENANCE_FIELD_NAMES}
 
 
 def _humanize(name: str) -> str:
@@ -117,12 +128,6 @@ def _control_for(prop: dict[str, Any]) -> str:
     if schema_type in ("integer", "number"):
         return "number"
     if schema_type == "array":
-        items = prop.get("items") or {}
-        # String lists are provenance-shaped — render them as locatable evidence
-        # snippets (read-only, highlighted in the note). Other arrays we can't
-        # edit safely, so show them read-only.
-        if items.get("type", "string") == "string":
-            return "evidence_verbatim"
         return "readonly"
     if schema_type == "object":
         # A nested object that isn't an ApproxDate — no good editor, show as-is.
@@ -206,9 +211,89 @@ def build_field_schema(registry: ToolRegistry) -> dict[str, dict[str, Any]]:
             continue
         schema[name] = {
             "label": _humanize(name),
+            "event_identity_fields": list(tool_def.event_identity_fields),
+            "comparison_fields": list(tool_def.comparison_fields),
             "fields": _fields_for_model(model),
         }
     return schema
+
+
+# ---------------------------------------------------------------------------
+# Adjudication hash — the comparability contract two runs must share
+# ---------------------------------------------------------------------------
+
+
+def _comparability_contract(
+    definition_name: str,
+    field_schema: dict[str, dict[str, Any]],
+    normalization_version: str,
+) -> dict[str, Any]:
+    """The schema-only contract two runs must share to be adjudicated.
+
+    INCLUDES what makes outputs line up field-by-field: the definition name, the
+    reviewable event/tool names, each field's name and control/type, enum option
+    sets, the per-event identity-key config (``event_identity_fields``) and the
+    fields chosen for comparison (``comparison_fields``), and the
+    normalization-rules version.
+
+    EXCLUDES everything that varies run-to-run without affecting comparability —
+    the system prompt, model/backend, sampling params (temperature/top_p/top_k),
+    reasoning effort, git commit, run date, and batch name. (Those are simply
+    not inputs here.) ``label`` and ``required`` are dropped too: a humanized
+    label or a required-ness toggle doesn't change whether two *values* compare.
+    """
+    events: dict[str, Any] = {}
+    for event_type, spec in field_schema.items():
+        fields = []
+        for f in spec.get("fields") or []:
+            opts = f.get("options")
+            fields.append(
+                {
+                    "name": f.get("name"),
+                    "control": f.get("control"),
+                    "options": sorted(opts) if opts is not None else None,
+                }
+            )
+        fields.sort(key=lambda f: f["name"] or "")
+        events[event_type] = {
+            "identity_fields": sorted(spec.get("event_identity_fields") or []),
+            "comparison_fields": sorted(spec.get("comparison_fields") or []),
+            "fields": fields,
+        }
+    return {
+        "definition_name": definition_name,
+        "normalization_version": normalization_version,
+        "events": events,
+    }
+
+
+def adjudication_hash(
+    definition_name: str,
+    field_schema: dict[str, dict[str, Any]],
+    *,
+    normalization_version: str = NORMALIZATION_VERSION,
+) -> str:
+    """Hash the comparability contract — two runs are adjudicable iff it matches.
+
+    Deliberately independent of the system prompt, model, sampling, and run
+    metadata (see :func:`_comparability_contract`): GPT-5-mini and Gemma
+    extracting the same definition produce the **same** adjudication hash and so
+    can be compared field-by-field; a definition whose fields, enums, or identity
+    keys changed produces a **different** one and cannot be meaningfully diffed.
+    """
+    payload = json.dumps(
+        _comparability_contract(definition_name, field_schema, normalization_version),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def adjudication_hash_from_registry(
+    definition_name: str, registry: ToolRegistry
+) -> str:
+    """``adjudication_hash`` over a registry's reviewable event schema."""
+    return adjudication_hash(definition_name, build_field_schema(registry))
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +310,7 @@ def _control_from_value(value: Any) -> str:
     if isinstance(value, (int, float)):
         return "number"
     if isinstance(value, list):
-        return "evidence_verbatim"
+        return "readonly"
     return "text"
 
 
@@ -263,6 +348,8 @@ def infer_field_schema_from_events(
                     existing["control"] = _control_from_value(value)
         schema[event_type] = {
             "label": _humanize(event_type),
+            "event_identity_fields": [],
+            "comparison_fields": [],
             "fields": list(fields.values()),
         }
     return schema

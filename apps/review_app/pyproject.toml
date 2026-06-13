@@ -1,0 +1,74 @@
+[project]
+name = "oncaireviewapp"
+version = "0.4.0"
+description = "Local, dependency-free physician review app for structured clinical-note extractions"
+readme = "README.md"
+license-files = ["LICENSE"]
+classifiers = [
+    "License :: Free For Educational Use",
+    "License :: Free for non-commercial use",
+]
+authors = [{ name = "David Hein", email = "davidhein67@gmail.com" }]
+maintainers = [{ name = "David Hein" }]
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=7", "ruff>=0.5", "ty>=0.0.1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.rules]
+# Surface anything ty is unsure about rather than letting it pass silently.
+possibly-unresolved-reference = "error"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+indent-width = 4
+
+[tool.ruff.lint]
+
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "PL",
+    "N",
+    "RUF",
+    "W",
+    "S",
+    "C4",
+    "ANN",
+    "ASYNC",
+    "BLE",
+    "INT",
+    "LOG",
+    "PIE",
+    "PTH",
+    "PERF",
+    "TRY",
+    "C90",
+]
+ignore = [
+    "TRY003",  # long messages at the raise site read better than bespoke exception classes here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, compare against literal status codes, and don't need annotating.
+"tests/**" = ["S101", "ANN", "PLR2004"]
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+docstring-code-line-length = "dynamic"

@@ -15,12 +15,12 @@ Used with batch_single.py for single-note processing.
 from __future__ import annotations
 
 import logging
-import re
 from enum import StrEnum
 from typing import Annotated
 
 from pydantic import BeforeValidator, Field
 
+from ..enum_helpers import build_enum_lookup, normalize_against
 from ..models import ExtractionEvent, ExtractionPlan
 from ..tools import ToolRegistry
 
@@ -130,40 +130,11 @@ class PanelTestPattern(StrEnum):
     NOT_SPECIFIED = "not specified"
 
 
-# =============================================================================
-# Normalization helpers
-# =============================================================================
-
-
-def _normalize_key(s: str) -> str:
-    """Reduce a string to a canonical comparison key by lowercasing and
-    stripping whitespace, hyphens, underscores, slashes, dots, and parens."""
-    return re.sub(r"[\s\-_./()]+", "", s).lower()
-
-
-def _build_enum_lookup(enum_cls: type[StrEnum]) -> dict[str, str]:
-    """Build a {normalized_key: enum_value} mapping for an entire StrEnum."""
-    return {_normalize_key(m.value): m.value for m in enum_cls}
-
-
-_TEST_NAME_LOOKUP = _build_enum_lookup(PanelTestName)
-_TEST_STATUS_LOOKUP = _build_enum_lookup(PanelTestStatus)
-_TEST_INTENSITY_LOOKUP = _build_enum_lookup(PanelTestIntensity)
-_TEST_EXTENT_LOOKUP = _build_enum_lookup(PanelTestExtent)
-_TEST_PATTERN_LOOKUP = _build_enum_lookup(PanelTestPattern)
-
-
-def _normalize_enum_value(
-    v: object, enum_cls: type[StrEnum], lookup: dict[str, str], field_name: str
-) -> str:
-    """Normalize a value against an enum lookup, logging when a correction is made."""
-    if isinstance(v, enum_cls):
-        return v.value
-    s = str(v).strip()
-    match = lookup.get(_normalize_key(s))
-    if match is not None and match != s:
-        logger.debug("normalizer fixed %s: %r -> %r", field_name, s, match)
-    return match if match is not None else s
+_TEST_NAME_LOOKUP = build_enum_lookup(PanelTestName)
+_TEST_STATUS_LOOKUP = build_enum_lookup(PanelTestStatus)
+_TEST_INTENSITY_LOOKUP = build_enum_lookup(PanelTestIntensity)
+_TEST_EXTENT_LOOKUP = build_enum_lookup(PanelTestExtent)
+_TEST_PATTERN_LOOKUP = build_enum_lookup(PanelTestPattern)
 
 
 def normalize_test_name(v: object) -> str:
@@ -176,7 +147,7 @@ def normalize_test_name(v: object) -> str:
     >>> normalize_test_name("cam 5.2")
     'CAM5.2'
     """
-    return _normalize_enum_value(v, PanelTestName, _TEST_NAME_LOOKUP, "test_name")
+    return normalize_against(v, _TEST_NAME_LOOKUP, "test_name", logger=logger)
 
 
 def normalize_test_status(v: object) -> str:
@@ -187,23 +158,19 @@ def normalize_test_status(v: object) -> str:
     >>> normalize_test_status("LOSS")
     'Loss'
     """
-    return _normalize_enum_value(v, PanelTestStatus, _TEST_STATUS_LOOKUP, "test_status")
+    return normalize_against(v, _TEST_STATUS_LOOKUP, "test_status", logger=logger)
 
 
 def normalize_test_intensity(v: object) -> str:
-    return _normalize_enum_value(
-        v, PanelTestIntensity, _TEST_INTENSITY_LOOKUP, "test_intensity"
-    )
+    return normalize_against(v, _TEST_INTENSITY_LOOKUP, "test_intensity", logger=logger)
 
 
 def normalize_test_extent(v: object) -> str:
-    return _normalize_enum_value(v, PanelTestExtent, _TEST_EXTENT_LOOKUP, "test_extent")
+    return normalize_against(v, _TEST_EXTENT_LOOKUP, "test_extent", logger=logger)
 
 
 def normalize_test_pattern(v: object) -> str:
-    return _normalize_enum_value(
-        v, PanelTestPattern, _TEST_PATTERN_LOOKUP, "test_pattern"
-    )
+    return normalize_against(v, _TEST_PATTERN_LOOKUP, "test_pattern", logger=logger)
 
 
 # =============================================================================
@@ -304,13 +271,22 @@ class PlanIhcTests(ExtractionPlan):
     )
 
 
-class FlagReportForReview(ExtractionPlan):
+class FlagReportForReview(ExtractionEvent):
     """Flag tool: only for genuinely ambiguous reports. See registry description."""
 
     reason: str = Field(
         ...,
         description=(
             "Reason for flagging this report for review, 'conflicting information', or 'multiple possible interpretations'. This should only be used for cases where the report is genuinely ambiguous or complex and cannot be reliably extracted with the current toolset"
+        ),
+    )
+    review_anchor: list[str] = Field(
+        ...,
+        description=(
+            "Exact text snippets from the report that should be highlighted "
+            "and used as jump targets in the review app. Each item should be "
+            "an exact substring containing the ambiguity. If several sections "
+            "are relevant, include multiple anchors."
         ),
     )
 
@@ -366,11 +342,15 @@ provided (e.g., "Outside case S445. A. Left Breast biopsy (S445-C7)"), use the
 internal name ("A"). If only external names are provided (e.g., "Specimen 1"),
 use those.
 
+# EVIDENCE FIELDS
+- Use `evidence` for exact source-note snippets supporting the extraction, especially the test name/result text when available.
+- The snippet must match the text exactly so it can be used in review. It should have one to two words before and after the relevant text to provide extra context for matching to the report
+
 # AMBIGUITIES
 - If there are multiple specimens but it is not clear which specimen was used for the tests, use the specimen id "unclear_specimen" for all tests and make note of this in the ihc_test_ambiguity_notes field.
 - If there is only a single specimen and the id/blocks are not specified, assume specimen "A" and make note of this assumption in the ihc_test_ambiguity_notes field.
 - If there are conflicting results for the same test on the SAME specimen, set flag_for_sub_specimen_heterogeneity to True and use "Multiple results" for the standardized_test_status, and make note of this in the ihc_test_ambiguity_notes field.
-- Only use the flag_report_for_review tool if the report contains contradictions, significant data corruption, or multiple possible interpretations / complexities that cannot be resolved with the current toolset
+- Only use the flag_report_for_review tool if the report contains contradictions, significant data corruption, or multiple possible interpretations / complexities that cannot be resolved with the current toolset. When flagging, populate review_anchor with exact report text snippets the review app can highlight and jump to.
 - In some cases a test may be associated with multiple specimens/blocks but all the results are the same, in this case you can combine them into a single test record and note the multiple specimen/block association in the specimen_id field (e.g., "A||B" if the same result is reported for both specimen A and specimen B. If the same test was run on multuiple blocks from the same specimen and all the results are the same, just use a single specimen id (e.g., "A"). This is to avoid duplication of test records. Remeber, if the results are different for the same test on the same specimen or the same test on different specimens, do NOT combine them, each distinct result should have its own test record to ensure accuracy and to capture any potential heterogeneity.
 
 # GENERAL WORKFLOW
@@ -390,11 +370,7 @@ use those.
 
 
 def create_path_kidney_ihc_registry() -> ToolRegistry:
-    """Create and configure the tool registry for IHC extraction.
-
-    NOTE: ledger_fields are set for forward-compatibility but have no effect
-    in single-note mode — there is no timeline/ledger passed between notes.
-    """
+    """Create and configure the tool registry for IHC extraction."""
     registry = ToolRegistry(single_note=True)
 
     registry.register(
@@ -424,6 +400,15 @@ def create_path_kidney_ihc_registry() -> ToolRegistry:
             "Call this after planning the specimens and tests"
         ),
         model=RecordIhcResult,
+        event_identity_fields=("specimen_id", "standardized_test_name"),
+        comparison_fields=(
+            "flag_for_sub_specimen_heterogeneity",
+            "given_result",
+            "standardized_test_status",
+            "standardized_test_intensity",
+            "standardized_test_extent",
+            "standardized_test_pattern",
+        ),
     )
 
     registry.register(

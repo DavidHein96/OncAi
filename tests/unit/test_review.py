@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 
 from oncai.fc_extraction.models import ExtractionEvent, ExtractionPlan
 from oncai.fc_extraction.tools import GatedToolRegistry, ToolDefinition, ToolRegistry
 from oncai.review import (
+    SlotState,
+    adjudication_hash,
+    adjudication_hash_from_registry,
     build_field_schema,
     build_review_package,
+    event_content_hash,
     infer_field_schema_from_events,
     package_from_jsonl,
+    record_to_slots,
 )
 from oncai.review.package import default_package_path
-
 
 # ---------------------------------------------------------------------------
 # build_field_schema — controls inferred from Pydantic models
@@ -36,7 +42,11 @@ def _field(schema: dict, event_type: str, name: str) -> dict:
 
 def test_field_schema_covers_event_tools_only() -> None:
     schema = build_field_schema(_example_registry())
-    assert set(schema) == {"record_diagnosis", "record_treatment"}
+    assert set(schema) == {
+        "record_diagnosis",
+        "record_treatment",
+        "flag_report_for_review",
+    }
     # Built-in control-flow tools never appear.
     assert "finish_note_extraction" not in schema
 
@@ -51,7 +61,9 @@ def test_field_schema_controls() -> None:
     assert dtype["required"] is True
 
     # ApproxDate -> date widget
-    assert _field(schema, "record_diagnosis", "diagnosis_date")["control"] == "approx_date"
+    assert (
+        _field(schema, "record_diagnosis", "diagnosis_date")["control"] == "approx_date"
+    )
 
     # optional str -> text, not required
     stage = _field(schema, "record_diagnosis", "stage")
@@ -63,16 +75,38 @@ def test_field_schema_controls() -> None:
     assert ttype["control"] == "enum"
     assert ttype["options"] == ["surgery", "systemic", "radiation", "other"]
 
-    # comment (required free text) survives; note_id is dropped (header chip)
+    # Base provenance/header fields are hidden from editable field schema.
     names = {f["name"] for f in schema["record_diagnosis"]["fields"]}
-    assert "comment" in names
+    assert "evidence" not in names
     assert "note_id" not in names
 
 
 def test_field_schema_label_humanized() -> None:
     schema = build_field_schema(_example_registry())
     assert schema["record_diagnosis"]["label"] == "Record Diagnosis"
-    assert _field(schema, "record_diagnosis", "diagnosis_date")["label"] == "Diagnosis Date"
+    assert (
+        _field(schema, "record_diagnosis", "diagnosis_date")["label"]
+        == "Diagnosis Date"
+    )
+
+
+def test_field_schema_includes_comparison_metadata() -> None:
+    class MyEvent(ExtractionEvent):
+        finding_id: str = Field(..., description="finding key")
+        value: int = Field(..., description="v")
+
+    reg = ToolRegistry(single_note=True)
+    reg.register(
+        name="record",
+        description="event tool",
+        model=MyEvent,
+        event_identity_fields=("finding_id",),
+        comparison_fields=("value",),
+    )
+
+    schema = build_field_schema(reg)
+    assert schema["record"]["event_identity_fields"] == ["finding_id"]
+    assert schema["record"]["comparison_fields"] == ["value"]
 
 
 def test_field_schema_excludes_plan_tools() -> None:
@@ -93,7 +127,6 @@ def test_field_schema_excludes_plan_tools() -> None:
 
 
 def test_field_schema_bool_control() -> None:
-    schema = build_field_schema(_example_registry())
     # PathKidneyBasic has bool flags — but example doesn't; build a tiny one.
 
     class Flagged(ExtractionEvent):
@@ -104,8 +137,57 @@ def test_field_schema_bool_control() -> None:
     reg.register(name="rec", description="d", model=Flagged)
     s = build_field_schema(reg)
     assert _field(s, "rec", "flag")["control"] == "bool"
-    # string lists render as locatable evidence snippets
-    assert _field(s, "rec", "snippets")["control"] == "evidence_verbatim"
+    # list fields are data, not implicit source-note anchors.
+    assert _field(s, "rec", "snippets")["control"] == "readonly"
+
+
+def test_registered_definitions_hide_provenance_fields() -> None:
+    from oncai.cli.fc_cmds import _DEFINITIONS
+
+    for _key, (module_path, factory_name) in _DEFINITIONS.items():
+        module = importlib.import_module(module_path)
+        registry = getattr(module, factory_name)()
+        schema = build_field_schema(registry)
+
+        assert "flag_report_for_review" in schema
+        names = {f["name"] for f in schema["flag_report_for_review"]["fields"]}
+        assert "review_anchor" not in names
+        assert "evidence" not in names
+
+
+def test_registered_definitions_teach_explicit_provenance() -> None:
+    from oncai.cli.fc_cmds import _DEFINITIONS
+
+    for _key, (module_path, _factory_name) in _DEFINITIONS.items():
+        module = importlib.import_module(module_path)
+        text = Path(module.__file__).read_text()
+
+        assert "`evidence`" in text
+        assert "field_evidence" not in text
+        assert "review_anchor" in text
+        assert "flag_for_review_anchor" not in text
+        assert "supporting quotes" not in text
+
+
+def test_ihc_definition_declares_event_identity_fields() -> None:
+    from oncai.fc_extraction.definitions.path_kidney_ihc import (
+        create_path_kidney_ihc_registry,
+    )
+
+    schema = build_field_schema(create_path_kidney_ihc_registry())
+
+    assert schema["record_ihc_result"]["event_identity_fields"] == [
+        "specimen_id",
+        "standardized_test_name",
+    ]
+    assert schema["record_ihc_result"]["comparison_fields"] == [
+        "flag_for_sub_specimen_heterogeneity",
+        "given_result",
+        "standardized_test_status",
+        "standardized_test_intensity",
+        "standardized_test_extent",
+        "standardized_test_pattern",
+    ]
 
 
 def test_gated_registry_schema_covers_all_phases() -> None:
@@ -116,9 +198,7 @@ def test_gated_registry_schema_covers_all_phases() -> None:
         depth: int = Field(..., description="d")
 
     gate = {
-        "classify": ToolDefinition(
-            name="classify", description="gate", model=GateEvent
-        )
+        "classify": ToolDefinition(name="classify", description="gate", model=GateEvent)
     }
     phase_map = {
         "biopsy": {
@@ -160,7 +240,7 @@ def test_infer_schema_from_events() -> None:
     assert controls["when"] == "approx_date"
     assert controls["count"] == "number"
     assert controls["flag"] == "bool"
-    assert controls["quotes"] == "evidence_verbatim"
+    assert controls["quotes"] == "readonly"
     assert controls["comment"] == "text"
     assert "note_id" not in controls
 
@@ -218,12 +298,124 @@ def test_build_package_groups_by_mrn_and_keys_events() -> None:
     assert len(patients["M1"]["events"]) == 2
     assert len(patients["M2"]["events"]) == 2
 
-    # Two events on the same note get distinct, stable keys.
+    # Two findings on the same note, no declared identity → ordinal slot keys.
     keys = [e["event_key"] for e in patients["M2"]["events"]]
-    assert keys == ["N3::record_diagnosis::0", "N3::record_diagnosis::1"]
+    assert keys == ["N3::record_diagnosis::1", "N3::record_diagnosis::2"]
 
     # Note text is attached where available.
     assert patients["M1"]["notes"]["N1"]["note_text"] == "report one"
+
+
+def test_event_key_uses_ordinal_without_declared_identity() -> None:
+    # No event_identity_fields → each finding keyed by its ordinal for its type.
+    rec = _record("N1", "M1", {"record_diagnosis": [{"d": "a"}, {"d": "b"}]})
+    pkg = build_review_package(
+        definition_name="X", batch="v1", records=[rec], field_schema={}, notes={}
+    )
+    keys = [e["event_key"] for e in pkg["patients"][0]["events"]]
+    assert keys == ["N1::record_diagnosis::1", "N1::record_diagnosis::2"]
+
+
+def test_event_key_uses_declared_identity_order_independently() -> None:
+    fs = {"record_x": {"label": "X", "event_identity_fields": ["sid"], "fields": []}}
+
+    def keys(events: list[dict]) -> set[str]:
+        rec = _record("N1", "M1", {"record_x": events})
+        pkg = build_review_package(
+            definition_name="X", batch="v1", records=[rec], field_schema=fs, notes={}
+        )
+        return {e["event_key"] for e in pkg["patients"][0]["events"]}
+
+    a, b = {"sid": "A", "v": 1}, {"sid": "B", "v": 2}
+    # Identity-derived keys (not positional) → stable across event order.
+    assert keys([a, b]) == keys([b, a])
+    assert all("::id-" in k for k in keys([a, b]))
+
+
+def test_identity_collision_gets_disambiguating_suffix() -> None:
+    fs = {"record_x": {"label": "X", "event_identity_fields": ["sid"], "fields": []}}
+    # Two findings claim the SAME identity (a data clash) → distinct keys via suffix.
+    rec = _record(
+        "N1", "M1", {"record_x": [{"sid": "A", "v": 1}, {"sid": "A", "v": 2}]}
+    )
+    pkg = build_review_package(
+        definition_name="X", batch="v1", records=[rec], field_schema=fs, notes={}
+    )
+    keys = [e["event_key"] for e in pkg["patients"][0]["events"]]
+    assert len(set(keys)) == 2
+    assert keys[1].endswith("::1")  # dup suffix on the collision
+
+
+def test_package_events_carry_fingerprint() -> None:
+    # Two identical findings: same value fingerprint, distinct ordinal slots.
+    rec = _record("N1", "M1", {"record_diagnosis": [{"d": "a"}, {"d": "a"}]})
+    evs = build_review_package(
+        definition_name="X", batch="v1", records=[rec], field_schema={}, notes={}
+    )["patients"][0]["events"]
+    assert evs[0]["fingerprint"] == evs[1]["fingerprint"]  # same value
+    assert evs[0]["event_key"] != evs[1]["event_key"]  # different slot (::1, ::2)
+
+
+def test_event_fingerprint_ignores_provenance_fields() -> None:
+    assert event_content_hash(
+        {"diagnosis": "ccRCC", "review_anchor": ["quoted one"]}
+    ) == event_content_hash({"diagnosis": "ccRCC", "review_anchor": ["quoted two"]})
+    assert event_content_hash(
+        {"diagnosis": "ccRCC", "evidence": ["quote"]}
+    ) == event_content_hash({"diagnosis": "ccRCC"})
+
+
+def test_record_to_slots_matches_package_events() -> None:
+    field_schema = {
+        "record_x": {"label": "X", "event_identity_fields": ["sid"], "fields": []}
+    }
+    record = _record(
+        "N1",
+        "M1",
+        {"record_x": [{"sid": "A", "value": 1}, {"sid": "A", "value": 2}]},
+    )
+
+    slots = record_to_slots(record, field_schema)
+    package = build_review_package(
+        definition_name="X",
+        batch="v1",
+        records=[record],
+        field_schema=field_schema,
+        notes={},
+    )
+
+    assert [slot.as_package_event() for slot in slots] == package["patients"][0][
+        "events"
+    ]
+    assert slots[0].fingerprint == event_content_hash({"sid": "A", "value": 1})
+    assert slots[1].event_key.endswith("::1")
+
+
+def test_record_to_slots_state_preserves_batch_key_sequence() -> None:
+    records = [
+        _record("N1", "M1", {"record_x": [{"value": "first"}]}),
+        _record("N1", "M1", {"record_x": [{"value": "second"}]}),
+    ]
+    state = SlotState()
+    slots = [
+        slot for record in records for slot in record_to_slots(record, {}, state=state)
+    ]
+
+    package = build_review_package(
+        definition_name="X",
+        batch="v1",
+        records=records,
+        field_schema={},
+        notes={},
+    )
+
+    assert [slot.event_key for slot in slots] == [
+        "N1::record_x::1",
+        "N1::record_x::2",
+    ]
+    assert [slot.as_package_event() for slot in slots] == package["patients"][0][
+        "events"
+    ]
 
 
 def test_build_package_falls_back_to_note_id_without_mrn() -> None:
@@ -261,8 +453,7 @@ def test_build_package_excludes_plans_and_backfills_schema() -> None:
     # Unknown event type is backfilled so the app can still render fields.
     assert "surprise_tool" in pkg["field_schema"]
     controls = {
-        f["name"]: f["control"]
-        for f in pkg["field_schema"]["surprise_tool"]["fields"]
+        f["name"]: f["control"] for f in pkg["field_schema"]["surprise_tool"]["fields"]
     }
     assert controls == {"score": "number"}
 
@@ -304,7 +495,11 @@ def test_package_from_jsonl_roundtrip(tmp_path: Path) -> None:
     with notes_jsonl.open("w") as fh:
         fh.write(
             json.dumps(
-                {"report_id": "KP-001", "report_text": "DIAGNOSIS: RCC.", "mrn": "M0001"}
+                {
+                    "report_id": "KP-001",
+                    "report_text": "DIAGNOSIS: RCC.",
+                    "mrn": "M0001",
+                }
             )
             + "\n"
         )
@@ -330,6 +525,13 @@ def test_package_from_jsonl_roundtrip(tmp_path: Path) -> None:
     assert pkg["field_schema"]["record_diagnosis"]["fields"]
 
 
+def test_default_package_path_segment_includes_batch_name(tmp_path: Path) -> None:
+    segment = tmp_path / "inbox" / "fc_extractions" / "kidney" / "001.jsonl"
+    assert default_package_path(segment) == segment.with_name(
+        "kidney.001.review_pkg.json"
+    )
+
+
 def test_package_from_jsonl_without_registry_or_notes(tmp_path: Path) -> None:
     batch = tmp_path / "v2.jsonl"
     with batch.open("w") as fh:
@@ -350,3 +552,147 @@ def test_package_from_jsonl_without_registry_or_notes(tmp_path: Path) -> None:
     # Inferred schema still lets the app render the event.
     assert "rec" in pkg["field_schema"]
     assert pkg["patients"][0]["notes"]["N1"]["note_text"] is None
+
+
+def test_package_from_jsonl_only_flagged_reports(tmp_path: Path) -> None:
+    batch = tmp_path / "v3.jsonl"
+    records = [
+        {
+            "note_id": "N1",
+            "mrn": "M1",
+            "success": True,
+            "definition_name": "Flagged",
+            "events": {"rec": [{"note_id": "N1", "value": "routine"}]},
+        },
+        {
+            "note_id": "N2",
+            "mrn": "M2",
+            "success": True,
+            "definition_name": "Flagged",
+            "events": {
+                "rec": [{"note_id": "N2", "value": "ambiguous"}],
+                "flag_report_for_review": [
+                    {
+                        "note_id": "N2",
+                        "comment": "ambiguous text",
+                        "reason": "conflicting information",
+                    }
+                ],
+            },
+        },
+    ]
+    with batch.open("w") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
+
+    out = package_from_jsonl(jsonl_path=batch, only_flagged=True)
+    pkg = json.loads(out.read_text())
+
+    assert [patient["mrn"] for patient in pkg["patients"]] == ["M2"]
+    event_types = [event["event_type"] for event in pkg["patients"][0]["events"]]
+    assert event_types == ["rec", "flag_report_for_review"]
+
+
+def test_package_from_jsonl_note_id_filter(tmp_path: Path) -> None:
+    batch = tmp_path / "v4.jsonl"
+    records = [
+        {
+            "note_id": "N1",
+            "mrn": "M1",
+            "success": True,
+            "definition_name": "Selected",
+            "events": {"rec": [{"note_id": "N1", "value": "a"}]},
+        },
+        {
+            "note_id": "N2",
+            "mrn": "M2",
+            "success": True,
+            "definition_name": "Selected",
+            "events": {"rec": [{"note_id": "N2", "value": "b"}]},
+        },
+    ]
+    with batch.open("w") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
+
+    out = package_from_jsonl(jsonl_path=batch, note_ids={"N2"})
+    pkg = json.loads(out.read_text())
+
+    assert [patient["mrn"] for patient in pkg["patients"]] == ["M2"]
+
+
+# ---------------------------------------------------------------------------
+# adjudication_hash — the comparability contract for cross-run review
+# ---------------------------------------------------------------------------
+
+
+class _DxAB(ExtractionEvent):
+    dx: Literal["a", "b"] = Field(..., description="diagnosis")
+
+
+class _DxABC(ExtractionEvent):
+    dx: Literal["a", "b", "c"] = Field(..., description="diagnosis")  # extra option
+
+
+class _DxRenamed(ExtractionEvent):
+    diagnosis: Literal["a", "b"] = Field(..., description="diagnosis")  # renamed
+
+
+def _reg(model, *, identity=(), comparison=()) -> ToolRegistry:
+    reg = ToolRegistry(single_note=True)
+    reg.register(
+        name="record",
+        description="d",
+        model=model,
+        event_identity_fields=identity,
+        comparison_fields=comparison,
+    )
+    return reg
+
+
+def test_adjudication_hash_is_stable_and_schema_sensitive() -> None:
+    base = adjudication_hash_from_registry("D", _reg(_DxAB))
+
+    # Stable for the same schema.
+    assert base == adjudication_hash_from_registry("D", _reg(_DxAB))
+    # Sensitive to enum option sets, field names, identity + comparison config,
+    # and definition name.
+    assert base != adjudication_hash_from_registry("D", _reg(_DxABC))
+    assert base != adjudication_hash_from_registry("D", _reg(_DxRenamed))
+    assert base != adjudication_hash_from_registry("D", _reg(_DxAB, identity=("dx",)))
+    assert base != adjudication_hash_from_registry("D", _reg(_DxAB, comparison=("dx",)))
+    assert base != adjudication_hash_from_registry("OTHER", _reg(_DxAB))
+
+
+def test_adjudication_hash_includes_normalization_version() -> None:
+    fs = build_field_schema(_reg(_DxAB))
+    assert adjudication_hash("D", fs, normalization_version="1") != adjudication_hash(
+        "D", fs, normalization_version="2"
+    )
+
+
+def test_adjudication_hash_ignores_run_params() -> None:
+    # The crux: same definition + same schema, but different batch name and run
+    # date → the SAME adjudication hash. So two models' runs are comparable.
+    records = [_record("N1", "M1", {"record_diagnosis": [{"diagnosis_name": "x"}]})]
+    fs = build_field_schema(_example_registry())
+
+    pkg_gpt = build_review_package(
+        definition_name="Example",
+        batch="kidney_gpt5mini",
+        records=records,
+        field_schema=fs,
+        notes={},
+        generated_at="2026-01-01T00:00:00+00:00",
+    )
+    pkg_gemma = build_review_package(
+        definition_name="Example",
+        batch="kidney_gemma4",
+        records=records,
+        field_schema=fs,
+        notes={},
+        generated_at="2026-02-02T00:00:00+00:00",
+    )
+
+    assert pkg_gpt["adjudication_hash"]  # present in the package
+    assert pkg_gpt["adjudication_hash"] == pkg_gemma["adjudication_hash"]

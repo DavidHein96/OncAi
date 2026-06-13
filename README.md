@@ -7,7 +7,7 @@ A small data-lake + LLM-extraction toolkit for pathology reports. Ingests raw CS
 
 Designed for one-report-in / one-set-of-findings-out workloads (e.g. nephrectomy pathology reports → tumor type + stage + margins + IHC results).
 
-> See [docs/architecture.md](docs/architecture.md) for how the system works, [docs/design.md](docs/design.md) for why, and [docs/incremental_extraction.md](docs/incremental_extraction.md) for incremental / addenda re-extraction.
+> See [docs/architecture.md](docs/architecture.md) for how the system works, [docs/design.md](docs/design.md) for why, [docs/incremental_extraction.md](docs/incremental_extraction.md) for incremental / addenda re-extraction, and [docs/review_system.md](docs/review_system.md) for the review-to-gold workflow.
 
 ## Quickstart
 
@@ -38,7 +38,7 @@ oncai fc run-single path_kidney_basic \
     --limit 20
 
 # Inspect / iterate the resulting JSONL
-oncai fc stage fc_outputs/PathKidneyBasic/v1.jsonl
+oncai fc peek fc_outputs/PathKidneyBasic/v1.001.jsonl
 oncai fc status
 
 # Push results back to remote
@@ -48,23 +48,20 @@ oncai push fc_extractions
 ## Architecture
 
 ```
-Remote (Box / shared drive)    Lake (local parquet)         DuckDB (queryable)
-┌──────────────────┐  pull  ┌─────────────────────┐  build  ┌─────────────────┐
-│ pathology/       │ ─────► │ lake/pathology/     │ ──────► │ raw.pathology   │
-│ cohorts/         │        │ lake/cohorts/       │ ──────► │ cohort.<name>   │
-│ fc_extractions/  │        │ lake/fc_extractions/│ ──────► │ extractions_raw.│
-│ runs/            │        │ lake/runs/          │         │   <batch>       │
-└──────────────────┘        └─────────────────────┘         │ runs.runs       │
-                                     ▲                       └─────────────────┘
-                            ingest   │
-                            ┌────────┴────────────┐
-                            │ inbox/<folder>/     │
-                            └─────────────────────┘
+ Remote (Box / shared drive)          Local — rebuildable from the inbox
+┌────────────────────────┐         ┌──────────────────┐         ┌──────────────────┐
+│ inbox/pathology/       │  pull   │ inbox/<folder>/  │ ingest  │ lake/<folder>/   │  build
+│ inbox/cohorts/         │ ◄─────► │  canonical,      │ ──────► │  parquet,        │ ──────►  DuckDB
+│ inbox/fc_extractions/  │  push   │  append-only,    │         │  disposable      │        (raw.pathology,
+│ inbox/fc_reviews/      │         │  content-hashed  │         │  projection      │         cohort.<name>,
+│ inbox/runs/            │         └──────────────────┘         └──────────────────┘         extractions_raw,
+└────────────────────────┘                                                                   extractions_gold,
+   only the inbox is synced — the lake + DuckDB never leave the machine                      runs.runs)
 ```
 
-**Data flow:** Remote → `pull` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL → `ingest fc_extractions` → Lake → `push` → Remote.
+**Data flow:** Remote inbox → `pull` → local inbox → `ingest` → Lake (parquet) → `build-db` → DuckDB → `fc run-single` → JSONL **back into `inbox/fc_extractions/`** → `ingest fc_extractions` → review package + `*.reviews.jsonl` → `ingest fc_reviews` → `extractions_gold.<batch>` → `push` (inbox) → Remote.
 
-**Why a lake + DuckDB:** the parquet lake is the source of truth (versioned, content-hashed merges). DuckDB is rebuilt from the lake on demand — no migrations, no schema drift between extractions and source data.
+**Why inbox-canonical:** the **inbox** is the source of truth — immutable, content-hashed, append-only. Everything irreproducible lives there: raw drops, extraction JSONLs, review verdicts, and per-run manifests. The lake and DuckDB are disposable projections rebuilt from the inbox on demand, so there are no migrations, no schema drift, and no whole-file clobber between machines (only the inbox is ever transferred).
 
 ### Remote storage
 
@@ -88,8 +85,8 @@ This keeps oncai transport-agnostic: the OS handles the network, oncai handles t
 | Command | Description |
 |---|---|
 | `oncai init` | Initialize folder structure and write `oncai.yaml` |
-| `oncai pull [FOLDER...]` | Pull parquet lake + inbox files from remote |
-| `oncai push [FOLDER...]` | Push local lake + inbox files to remote |
+| `oncai pull [FOLDER...]` | Pull inbox files from remote (rebuild the lake locally with `ingest`) |
+| `oncai push [FOLDER...]` | Push inbox files to remote (the derived lake is never pushed) |
 | `oncai ingest [DATASET]` | Replay inbox files into lake parquets |
 | `oncai build-db` | Build DuckDB from lake parquets |
 | `oncai status` | Show inbox / lake / database status (`--check` for sidecar + health checks) |
@@ -113,8 +110,8 @@ Single-note extraction: the model receives one report at a time + the registered
 | `oncai fc list` | List the shipped single-note definitions |
 | `oncai fc run-single <definition>` | Run a definition over a source table or JSONL |
 | `oncai fc status [PATH]` | Tally success/failure across JSONL outputs |
-| `oncai fc stage <jsonl>` | Stage a JSONL into `extractions_staging.<stem>` for ad-hoc SQL |
-| `oncai fc unstage <stem>` | Drop a staging table (or `--all`) |
+| `oncai fc peek <jsonl>` | Load a JSONL into `scratch.<stem>` for a quick SQL look |
+| `oncai fc unpeek <stem>` | Drop a scratch table (or `--all`) |
 | `oncai fc manifest <path>` | Show the run manifest for a batch |
 
 Shipped definitions:
@@ -141,14 +138,32 @@ Key options for `fc run-single`:
 --cohort <name>            Filter to ids in a named cohort
 --id-file <csv>            Filter to ids from a CSV
 --workers <n>              Concurrent workers (default 1)
---incremental              Only run rows whose source content_hash differs from
-                           the existing extractions_raw.<batch> baseline. Output
-                           bumps to <batch>.v<N>.jsonl.
+--full                     Re-extract every matching row into a new segment,
+                           ignoring what prior segments already cover
+--scratch                  One-off test run: write to fc_outputs only, don't
+                           promote a segment into the inbox. Peek with `fc peek`
 --retry-failed             Drop previously-failed records and rerun just those
 --reasoning-effort <lvl>   Azure reasoning depth: low / medium / high / none
+--review-package <scope>   Auto-build review package: flagged / all / none
+                           (default flagged)
 ```
 
-`--incremental` re-extracts only new and changed reports (addenda) against a baseline batch, writing a versioned `<batch>.v<N>.jsonl` that merges back into the same lake parquet. See [docs/incremental_extraction.md](docs/incremental_extraction.md) for the full workflow, versioned batches, and `--force-rerun`.
+Re-running a batch is **incremental by default**: it diffs the source against the batch's existing segments and extracts only new and changed reports (addenda) into the next segment. See [docs/incremental_extraction.md](docs/incremental_extraction.md) for the segment model, the delta buckets, `--reextract-on-prompt-change`, and `--force-rerun`.
+
+Review packages are queues, not necessarily the whole batch. The automatic
+package created by `fc run-single` defaults to reports that called
+`flag_report_for_review`. To package disagreement cases across repeated runs:
+
+```bash
+oncai fc review-package run_a.jsonl --scope disagreements --compare-with run_b.jsonl
+oncai fc review-package run_a.jsonl --scope flagged-or-disagreements --compare-with run_b.jsonl --compare-with run_c.jsonl
+```
+
+Disagreement checks ignore free-text string fields by default; schema-backed
+enum/literal strings, numeric fields, booleans, and structured date fields still
+participate when the workflow definition is available. See
+[docs/review_system.md](docs/review_system.md) for the full package, review app,
+and `extractions_gold` workflow.
 
 ### Cohorts (`oncai cohort`)
 
@@ -165,7 +180,7 @@ CSVs can also be dropped into `inbox/cohorts/` and ingested via `oncai ingest co
 
 ### Run History (`oncai runs`)
 
-Every `fc run-single` invocation logs metadata to `lake/runs/runs.parquet` (and the DuckDB `runs.runs` table).
+Every `fc run-single` invocation writes an immutable manifest to `inbox/runs/<run_id>.run.json` — a `started` record at launch, rewritten with the completed/failed/cancelled sections when it ends (the run owns its own file, so there's no shared log to clobber). The manifests are canonical and ride the inbox `push`; `ingest runs` projects them into `lake/runs/runs.parquet` (and the DuckDB `runs.runs` table) for SQL. `runs list/show/compare` read the manifests directly, so they reflect in-flight runs without an ingest step.
 
 | Command | Description |
 |---|---|
@@ -214,7 +229,8 @@ The multi-line path always applies generic cleaning. Two source-specific steps a
 ### Other folders
 
 - `inbox/cohorts/<name>.csv` → `oncai ingest cohorts` (one parquet per file; the filename is the cohort name).
-- `inbox/fc_extractions/<batch>.jsonl` → `oncai ingest fc_extractions` (extraction outputs merged back into the lake).
+- `inbox/fc_extractions/<batch>/NNN.jsonl` → `oncai ingest fc_extractions` (a batch is a folder of numbered segments; segments merge into one lake parquet, highest segment per record wins). `fc run-single` promotes its output here automatically.
+- `inbox/fc_reviews/<batch>.NNN.review_pkg.json` + `<batch>.NNN.reviews.jsonl` → `oncai ingest fc_reviews` (a batch's per-segment reviews merge into `extractions_gold.<batch>`; approved events only, highest segment per note wins).
 
 ### Skip the lake for ready-made notes
 
@@ -233,8 +249,9 @@ oncai fc run-single path_kidney_basic --jsonl notes.jsonl --batch v1 --backend g
 | `raw` | `pathology` | Pathology reports (collated multi-line CSVs → one row per report) |
 | `cohort` | `cohorts` | One table per named cohort + `cohort.meta` |
 | `extractions_raw` | `fc_extractions` | One table per FC batch, wide row-per-note layout |
+| `extractions_gold` | `fc_reviews` | One table per completed review batch, approved events with edits applied |
 | `extractions_transformed` | (per-batch `.sql` files) | Materialized derived tables from `<batch>.sql` |
-| `extractions_staging` | `oncai fc stage` | Ad-hoc per-event flat layout for exploration |
+| `scratch` | `oncai fc peek` | Throwaway per-event layout for a quick look (cleared on rebuild) |
 | `runs` | `runs` | Run-log history (one row per `fc run-single`) |
 
 Per-batch SQL transforms: dropping `<batch>.sql` next to `lake/fc_extractions/<batch>.parquet` runs at `build-db` time. Use it to reshape `events_json` columns into typed relational tables for downstream queries.

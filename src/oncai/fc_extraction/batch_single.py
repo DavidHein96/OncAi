@@ -361,10 +361,22 @@ def _build_run_meta(
     source_table: str,
     client: FunctionCallingClient,
     system_prompt: str,
+    registry: ToolRegistry,
     backend_name: str | None = None,
 ) -> dict[str, Any]:
-    """Build run-level metadata computed once per batch."""
-    from .manifest import get_code_version, get_git_info, hash_string
+    """Build run-level metadata computed once per batch.
+
+    Stamps both ``system_prompt_hash`` (prompt only, provenance) and
+    ``definition_hash`` (prompt + tool schemas) on every record. The delta's
+    change-detection keys on ``definition_hash`` so a changed Pydantic field
+    triggers re-extraction, not just a prompt edit.
+    """
+    from .manifest import (
+        definition_hash_from_registry,
+        get_code_version,
+        get_git_info,
+        hash_string,
+    )
 
     git_info = get_git_info()
     return {
@@ -379,6 +391,7 @@ def _build_run_meta(
         "git_dirty": git_info["dirty"],
         "code_version": get_code_version(),
         "system_prompt_hash": hash_string(system_prompt),
+        "definition_hash": definition_hash_from_registry(system_prompt, registry),
     }
 
 
@@ -591,11 +604,16 @@ def _serialize_extraction_result(
         bucket = (
             plans_by_type if isinstance(event_obj, ExtractionPlan) else events_by_type
         )
-        bucket.setdefault(tool_name, []).append(event_obj.model_dump())
+        event_data = event_obj.model_dump(mode="json")
+        if not isinstance(event_obj, ExtractionPlan):
+            for provenance_field in ("evidence", "review_anchor"):
+                if event_data.get(provenance_field) in ({}, [], "", None):
+                    event_data.pop(provenance_field, None)
+        bucket.setdefault(tool_name, []).append(event_data)
 
     finish_data = None
     if extraction.finish:
-        finish_data = extraction.finish.model_dump()
+        finish_data = extraction.finish.model_dump(mode="json")
         # Remove multi-note fields that don't apply to single-note extraction
         finish_data.pop("needs_more_notes", None)
 
@@ -775,6 +793,7 @@ def run_fc_single_batch(
         source_table=source_table,
         client=client,
         system_prompt=config.system_prompt,
+        registry=registry,
         backend_name=backend_name,
     )
 

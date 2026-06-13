@@ -13,6 +13,7 @@ from oncai.config import OncaiConfig, get_dataset_folders
 from oncai.sidecar import (
     SIDECAR_SUFFIX,
     ensure_sidecar,
+    hash_for_compare,
     sidecar_path,
 )
 
@@ -29,37 +30,18 @@ class ConflictInfo:
 
 
 @dataclass
-class LakeFileDiff:
-    """Per-parquet diff between source and destination for sync/push reporting.
+class TransferResult:
+    """Per-folder inbox transfer summary for sync/push reporting.
 
-    All fields read parquet metadata only (the footer), so this is cheap even
-    on cloud-mounted destinations.
+    Only inbox files move between local and remote — the lake is a disposable
+    projection rebuilt locally via ``oncai ingest`` + ``oncai build-db``, so it
+    is never synced (which is what makes whole-file clobber impossible).
     """
 
-    name: str
-    action: str  # "create" (no dest) or "update" (replacing existing)
-    src_rows: int = 0
-    dst_rows: int = 0
-    added_cols: list[str] = field(default_factory=list)
-    removed_cols: list[str] = field(default_factory=list)
-    changed_dtypes: list[tuple[str, str, str]] = field(default_factory=list)
-    # (column, src_dtype, dst_dtype) for cols where dtype changed.
-
-    @property
-    def row_delta(self) -> int:
-        return self.src_rows - self.dst_rows
-
-
-@dataclass
-class TransferResult:
     folder: str
-    lake_copied: int = 0
     inbox_copied: int = 0
-    skipped_match: int = 0
     conflicts: list[ConflictInfo] = field(default_factory=list)
-    # Per-file detail for files that were (or would be) copied. Populated
-    # even in dry-run so users can preview the diff.
-    lake_files: list[LakeFileDiff] = field(default_factory=list)
+    # Filenames that were (or, in dry-run, would be) copied.
     inbox_files: list[str] = field(default_factory=list)
 
 
@@ -83,13 +65,6 @@ class SyncConflictError(RuntimeError):
 # --- internal helpers ------------------------------------------------------
 
 
-def _needs_copy(src: Path, dst: Path) -> bool:
-    """Size-based copy check used for lake parquets (regenerable, lower stakes)."""
-    if not dst.exists():
-        return True
-    return src.stat().st_size != dst.stat().st_size
-
-
 def _copy_with_sidecar(src: Path, dst: Path) -> None:
     """Copy ``src`` then its sidecar, file first so partial state is detectable."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +81,6 @@ def _transfer_inbox_files(
     folder: str,
     direction: str,
     dry_run: bool,
-    extensions: tuple[str, ...] = (".csv", ".jsonl", "_manifest.json", ".sql"),
 ) -> tuple[list[str], list[ConflictInfo]]:
     """Mirror inbox files (with sidecars) from ``src_dir`` to ``dst_dir``.
 
@@ -114,9 +88,11 @@ def _transfer_inbox_files(
     overwritten. Hash mismatches are reported as conflicts; the caller decides
     whether to raise.
 
-    Default extensions include ``_manifest.json`` (run-level provenance) and
-    ``.sql`` (per-parquet transforms run by ``oncai build-db``). Folders that
-    don't use them are unaffected — the glob just finds no matching files.
+    Every regular file in the inbox folder is canonical and transported as-is
+    (raw CSVs, extraction/review JSONLs, run manifests, ``.sql`` transforms,
+    cohort CSVs, …) — only hash sidecars and in-progress ``.tmp`` writes are
+    skipped. Transporting by presence rather than an extension allow-list means
+    a new inbox file type is synced automatically, with no list to keep in step.
     """
     if not src_dir.exists():
         return [], []
@@ -124,36 +100,39 @@ def _transfer_inbox_files(
     conflicts: list[ConflictInfo] = []
     pending: list[tuple[Path, Path]] = []
 
-    src_files: list[Path] = []
-    for ext in extensions:
-        src_files.extend(src_dir.glob(f"*{ext}"))
+    # Walk recursively so nested layouts (a batch folder of extraction
+    # segments, ``<batch>/NNN.jsonl``) transport too. Relative paths are
+    # preserved at the destination.
+    src_files = [
+        p
+        for p in src_dir.rglob("*")
+        if p.is_file()
+        and not p.name.endswith(SIDECAR_SUFFIX)
+        and not p.name.endswith(".tmp")
+        and not p.name.endswith(".partial")
+    ]
 
     for src in sorted(src_files):
-        if src.name.endswith(SIDECAR_SUFFIX):
-            continue
-        dst = dst_dir / src.name
+        rel = src.relative_to(src_dir)
+        dst = dst_dir / rel
 
         if not dst.exists():
             pending.append((src, dst))
             continue
 
-        # Both exist — compare hashes. ensure_sidecar lazily writes one if missing.
-        # On the source side, only compute if a sidecar is feasible; on a read-only
-        # source we fall back to computing without writing.
-        try:
-            src_hash = ensure_sidecar(src)
-        except OSError:
-            from oncai.sidecar import compute_sha256
-
-            src_hash = compute_sha256(src)
-        dst_hash = ensure_sidecar(dst)
+        # Both exist — compare hashes WITHOUT writing sidecars, so the conflict
+        # scan and dry-run stay side-effect-free (no .sha256 materialised, in
+        # particular not onto a read-only or remote destination). Sidecars are
+        # written only on the actual copy path below.
+        src_hash = hash_for_compare(src)
+        dst_hash = hash_for_compare(dst)
 
         if src_hash == dst_hash:
             continue
         conflicts.append(
             ConflictInfo(
                 folder=folder,
-                filename=src.name,
+                filename=rel.as_posix(),
                 local_hash=dst_hash if direction == "pull" else src_hash,
                 remote_hash=src_hash if direction == "pull" else dst_hash,
                 direction=direction,
@@ -163,7 +142,7 @@ def _transfer_inbox_files(
     if conflicts:
         return [], conflicts
 
-    pending_names = [src.name for src, _ in pending]
+    pending_names = [src.relative_to(src_dir).as_posix() for src, _ in pending]
 
     if dry_run:
         return pending_names, []
@@ -179,147 +158,29 @@ def _transfer_inbox_files(
     return pending_names, []
 
 
-def _parquet_diff(src: Path, dst: Path) -> LakeFileDiff:
-    """Build a metadata-only diff between two parquet files (or src vs missing dst)."""
-    src_lf = pl.scan_parquet(src)
-    src_schema = src_lf.collect_schema()
-    src_rows = src_lf.select(pl.len()).collect().item()  # type: ignore[union-attr]
-
-    if not dst.exists():
-        return LakeFileDiff(
-            name=src.name,
-            action="create",
-            src_rows=src_rows,
-            dst_rows=0,
-            added_cols=list(src_schema.names()),
-        )
-
-    dst_lf = pl.scan_parquet(dst)
-    dst_schema = dst_lf.collect_schema()
-    dst_rows = dst_lf.select(pl.len()).collect().item()  # type: ignore[union-attr]
-
-    src_cols = set(src_schema.names())
-    dst_cols = set(dst_schema.names())
-    added = sorted(src_cols - dst_cols)
-    removed = sorted(dst_cols - src_cols)
-    changed = []
-    for col in sorted(src_cols & dst_cols):
-        sd, dd = str(src_schema[col]), str(dst_schema[col])
-        if sd != dd:
-            changed.append((col, sd, dd))
-
-    return LakeFileDiff(
-        name=src.name,
-        action="update",
-        src_rows=src_rows,
-        dst_rows=dst_rows,
-        added_cols=added,
-        removed_cols=removed,
-        changed_dtypes=changed,
-    )
-
-
-def _parquets_content_equal(src: Path, dst: Path) -> bool:
-    """Check whether two parquets contain the same rows (order-independent).
-
-    Polars rewrites parquets non-deterministically (encoding/stats/row-group
-    layout vary), so a re-ingest of unchanged data shifts the file size by a
-    few bytes. This fingerprint check lets the size-based ``_needs_copy``
-    detection skip those false positives.
-    """
-    src_df = pl.read_parquet(src)
-    dst_df = pl.read_parquet(dst)
-    return src_df.hash_rows().sort().equals(dst_df.hash_rows().sort())
-
-
-def _transfer_lake_parquets(
-    src_dir: Path,
-    dst_dir: Path,
-    *,
-    dry_run: bool,
-    extra_globs: tuple[str, ...] = (),
-) -> list[LakeFileDiff]:
-    """Mirror parquets (and any extra sidecar globs) from ``src_dir`` to ``dst_dir``.
-
-    Returns one ``LakeFileDiff`` per file that was (or would be) copied. The
-    diffs are populated for parquets via cheap metadata reads; sidecars from
-    ``extra_globs`` get a minimal entry without row/schema info.
-    """
-    if not src_dir.exists():
-        return []
-
-    if not dry_run:
-        dst_dir.mkdir(parents=True, exist_ok=True)
-    diffs: list[LakeFileDiff] = []
-
-    for src in src_dir.glob("*.parquet"):
-        dst = dst_dir / src.name
-        if not _needs_copy(src, dst):
-            continue
-        diff = _parquet_diff(src, dst)
-        # Size differs but the cheap metadata diff shows no logical change —
-        # confirm with a content fingerprint before flagging this as a copy.
-        if (
-            diff.action == "update"
-            and diff.row_delta == 0
-            and not diff.added_cols
-            and not diff.removed_cols
-            and not diff.changed_dtypes
-            and _parquets_content_equal(src, dst)
-        ):
-            continue
-        diffs.append(diff)
-        if not dry_run:
-            shutil.copy2(src, dst)
-
-    for pattern in extra_globs:
-        for src in src_dir.glob(pattern):
-            dst = dst_dir / src.name
-            if _needs_copy(src, dst):
-                diffs.append(
-                    LakeFileDiff(
-                        name=src.name,
-                        action="create" if not dst.exists() else "update",
-                    )
-                )
-                if not dry_run:
-                    shutil.copy2(src, dst)
-    return diffs
-
-
-def _extra_globs_for(folder: str) -> tuple[str, ...]:
-    if folder == "misc":
-        return ("*.schema.json",)
-    if folder == "cohorts":
-        return ("*.cohort.json",)
-    return ()
-
-
 # --- public transport ------------------------------------------------------
 
 
-def sync_remote_to_lake(
+def pull_inbox_from_remote(
     config: OncaiConfig,
     folders: list[str] | None = None,
     dry_run: bool = False,
 ) -> list[TransferResult]:
-    """Sync remote → local for both lake parquets and inbox files.
+    """Pull the inbox (remote → local) for every dataset folder.
 
-    Inbox files are mirrored with hash sidecars; mismatches raise
-    ``SyncConflictError`` after all folders are scanned (no partial mutations).
+    Only inbox files move — the lake is a disposable projection rebuilt locally
+    via ``oncai ingest`` + ``oncai build-db``. Inbox files are mirrored with
+    hash sidecars and never overwritten; mismatches raise ``SyncConflictError``
+    after all folders are scanned (no partial mutations).
     """
     target_folders = folders or get_dataset_folders()
     results: list[TransferResult] = []
     all_conflicts: list[ConflictInfo] = []
 
-    # First pass: detect conflicts across all folders without mutating.
+    # First pass: detect conflicts across all folders without copying.
     folder_plans: list[tuple[str, TransferResult]] = []
     for folder in target_folders:
-        remote_folder = config.remote_path / folder
-        lake_folder = config.lake_path / folder
         result = TransferResult(folder=folder)
-
-        # Inbox conflicts are fatal — detect first.
         remote_inbox = config.remote_path / "inbox" / folder
         local_inbox = config.inbox_path / folder
         _, conflicts = _transfer_inbox_files(
@@ -332,27 +193,15 @@ def sync_remote_to_lake(
         if conflicts:
             all_conflicts.extend(conflicts)
             result.conflicts.extend(conflicts)
-
         folder_plans.append((folder, result))
 
     if all_conflicts:
         raise SyncConflictError(all_conflicts)
 
-    # Second pass: mutate.
+    # Second pass: copy.
     for folder, result in folder_plans:
-        remote_folder = config.remote_path / folder
-        lake_folder = config.lake_path / folder
         remote_inbox = config.remote_path / "inbox" / folder
         local_inbox = config.inbox_path / folder
-
-        lake_files = _transfer_lake_parquets(
-            remote_folder,
-            lake_folder,
-            dry_run=dry_run,
-            extra_globs=_extra_globs_for(folder),
-        )
-        result.lake_files = lake_files
-        result.lake_copied = len(lake_files)
         inbox_files, _ = _transfer_inbox_files(
             remote_inbox,
             local_inbox,
@@ -367,15 +216,16 @@ def sync_remote_to_lake(
     return results
 
 
-def push_lake_to_remote(
+def push_inbox_to_remote(
     config: OncaiConfig,
     folders: list[str] | None = None,
     dry_run: bool = False,
 ) -> list[TransferResult]:
-    """Push local → remote for both lake parquets and inbox files.
+    """Push the inbox (local → remote) for every dataset folder.
 
-    Inbox is canonical; pushing keeps remote in sync with local drops. Hash
-    mismatches raise ``SyncConflictError``.
+    The inbox is canonical; pushing keeps the remote in step with local drops
+    and pipeline outputs (extractions, reviews, run manifests). The lake is
+    never pushed — it is derived. Hash mismatches raise ``SyncConflictError``.
     """
     target_folders = folders or get_dataset_folders()
     results: list[TransferResult] = []
@@ -402,19 +252,8 @@ def push_lake_to_remote(
         raise SyncConflictError(all_conflicts)
 
     for folder, result in folder_plans:
-        lake_folder = config.lake_path / folder
-        remote_folder = config.remote_path / folder
         local_inbox = config.inbox_path / folder
         remote_inbox = config.remote_path / "inbox" / folder
-
-        lake_files = _transfer_lake_parquets(
-            lake_folder,
-            remote_folder,
-            dry_run=dry_run,
-            extra_globs=_extra_globs_for(folder),
-        )
-        result.lake_files = lake_files
-        result.lake_copied = len(lake_files)
         inbox_files, _ = _transfer_inbox_files(
             local_inbox,
             remote_inbox,
@@ -517,10 +356,14 @@ def get_inbox_files(config: OncaiConfig) -> dict[str, list[Path]]:
         inbox_folder = config.inbox_path / folder
         if inbox_folder.exists():
             # Look for CSV, JSONL, and Parquet files
+            # rglob so a batch folder of extraction segments
+            # (fc_extractions/<batch>/NNN.jsonl) is counted too.
             files = (
-                list(inbox_folder.glob("*.csv"))
-                + list(inbox_folder.glob("*.jsonl"))
-                + list(inbox_folder.glob("*.parquet"))
+                list(inbox_folder.rglob("*.csv"))
+                + list(inbox_folder.rglob("*.jsonl"))
+                + list(inbox_folder.rglob("*.review_pkg.json"))
+                + list(inbox_folder.rglob("*.run.json"))
+                + list(inbox_folder.rglob("*.parquet"))
             )
             if files:
                 results[folder] = files

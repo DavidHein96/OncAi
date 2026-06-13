@@ -23,8 +23,8 @@ from oncai.lake import (
     SyncConflictError,
     get_inbox_files,
     get_lake_status,
-    push_lake_to_remote,
-    sync_remote_to_lake,
+    pull_inbox_from_remote,
+    push_inbox_to_remote,
 )
 from oncai.schemas import get_schema, list_schemas
 
@@ -36,54 +36,30 @@ from ._shared import console, get_config
 
 
 def _print_transfer_summary(results, *, dry_run: bool) -> None:
-    """Render sync/push results as a per-folder rich table plus filename list."""
+    """Render inbox transfer results as a per-folder rich table plus filename list."""
     verb = "would copy" if dry_run else "copied"
-    total_lake = sum(r.lake_copied for r in results)
     total_inbox = sum(r.inbox_copied for r in results)
 
-    if total_lake == 0 and total_inbox == 0:
+    if total_inbox == 0:
         console.print("[yellow]No files to copy (everything up to date)[/yellow]")
         return
 
     table = Table()
     table.add_column("Folder", style="cyan")
-    table.add_column("Lake", justify="right")
-    table.add_column("Inbox", justify="right")
+    table.add_column("Files", justify="right")
     for r in results:
-        if r.lake_copied or r.inbox_copied:
-            table.add_row(r.folder, str(r.lake_copied), str(r.inbox_copied))
+        if r.inbox_copied:
+            table.add_row(r.folder, str(r.inbox_copied))
     console.print(table)
 
-    # Per-folder file detail with row/schema diff for parquets.
     for r in results:
-        if not (r.lake_files or r.inbox_files):
+        if not r.inbox_files:
             continue
         console.print(f"\n[cyan]{r.folder}[/cyan]")
-        for d in r.lake_files:
-            is_parquet = d.name.endswith(".parquet")
-            if d.action == "create":
-                summary = f"NEW   {d.src_rows:,} rows" if is_parquet else "NEW"
-            elif is_parquet:
-                delta = d.row_delta
-                sign = "+" if delta > 0 else ""
-                summary = (
-                    f"UPDATE {d.dst_rows:,} → {d.src_rows:,} rows ({sign}{delta:,})"
-                )
-            else:
-                summary = "UPDATE"
-            console.print(f"  [dim]lake[/dim]  {d.name}  [dim]{summary}[/dim]")
-            if d.added_cols and d.action != "create":
-                console.print(
-                    f"        [green]+cols:[/green] {', '.join(d.added_cols)}"
-                )
-            if d.removed_cols:
-                console.print(f"        [red]-cols:[/red] {', '.join(d.removed_cols)}")
-            for col, src_dt, dst_dt in d.changed_dtypes:
-                console.print(f"        [yellow]~[/yellow] {col}: {dst_dt} → {src_dt}")
         for name in r.inbox_files:
             console.print(f"  [dim]inbox[/dim] {name}")
 
-    console.print(f"\n[green]✓[/green] {verb}: {total_lake} lake, {total_inbox} inbox")
+    console.print(f"\n[green]✓[/green] {verb}: {total_inbox} inbox files")
 
 
 def _run_transfer(
@@ -331,13 +307,18 @@ def pull(
         False, "--dry-run", help="Show what would be copied without copying"
     ),
 ):
-    """Pull remote → local: lake parquets and inbox files (with sidecars)."""
+    """Pull inbox files from remote (with sidecars).
+
+    Only the inbox moves — rebuild the lake locally with ``oncai ingest`` and
+    ``oncai build-db``. The lake is a disposable projection of the inbox, so it
+    is never transferred.
+    """
     config = get_config()
     _run_transfer(
-        action="Pulling",
-        src=config.remote_path,
-        dst=config.lake_path,
-        fn=lambda: sync_remote_to_lake(
+        action="Pulling inbox",
+        src=config.remote_path / "inbox",
+        dst=config.inbox_path,
+        fn=lambda: pull_inbox_from_remote(
             config, folders=folder or None, dry_run=dry_run
         ),
         folder=folder,
@@ -354,13 +335,17 @@ def push(
         False, "--dry-run", help="Show what would be copied without copying"
     ),
 ):
-    """Push local → remote: lake parquets and inbox files (with sidecars)."""
+    """Push inbox files to remote (with sidecars).
+
+    The inbox is canonical — raw drops plus pipeline outputs (extractions,
+    reviews, run manifests). The lake is derived and never pushed.
+    """
     config = get_config()
     _run_transfer(
-        action="Pushing",
-        src=config.lake_path,
-        dst=config.remote_path,
-        fn=lambda: push_lake_to_remote(
+        action="Pushing inbox",
+        src=config.inbox_path,
+        dst=config.remote_path / "inbox",
+        fn=lambda: push_inbox_to_remote(
             config, folders=folder or None, dry_run=dry_run
         ),
         folder=folder,
@@ -371,7 +356,10 @@ def push(
 def ingest(
     dataset: str | None = typer.Argument(
         None,
-        help="Dataset folder to ingest (default: all). E.g. pathology, fc_extractions.",
+        help=(
+            "Dataset folder to ingest (default: all). "
+            "E.g. pathology, fc_extractions, fc_reviews."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be ingested without writing"
@@ -381,8 +369,8 @@ def ingest(
 
     - Dated folders (pathology) require ``YYYY-MM-DD_*.{csv,jsonl}``
       filenames and are rebuilt from scratch in date order on every run.
-    - Static folders (fc_extractions): each inbox file maps to its own lake
-      parquet, no merging across files.
+    - Static folders (fc_extractions, fc_reviews): each batch maps to its own
+      lake parquet, no merging across unrelated batches.
     - Named folders (cohorts): filename = identity.
     """
     config = get_config()
@@ -415,6 +403,9 @@ def build_db(
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip confirmation when using --force"
     ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Fail the build if any per-batch .sql transform errors"
+    ),
 ):
     """Build DuckDB database from lake parquet files."""
     config = get_config()
@@ -429,7 +420,11 @@ def build_db(
 
     console.print(f"[blue]Building database: {config.db_path}[/blue]")
 
-    results = build_database(config, force=force)
+    try:
+        results = build_database(config, force=force, strict=strict)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
 
     if not results:
         console.print("[yellow]No data to build database from[/yellow]")

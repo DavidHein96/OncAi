@@ -16,7 +16,7 @@ def db_update(
         ...,
         help=(
             "Lake folder to refresh in the database. "
-            "E.g.: cohorts, fc_extractions, pathology, runs"
+            "E.g.: cohorts, fc_extractions, fc_reviews, pathology, runs"
         ),
     ),
 ):
@@ -27,6 +27,7 @@ def db_update(
     Examples:\n
         oncai db update cohorts\n
         oncai db update fc_extractions\n
+        oncai db update fc_reviews\n
         oncai db update pathology
     """
     from oncai.db import update_database_folder

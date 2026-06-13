@@ -9,9 +9,15 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 _APPROX_DATE_RE = re.compile(r"^\d{4}(-\d{2}(-\d{2})?)?$")
+
+
+class _ToolArguments(BaseModel):
+    """Base for structured LLM tool payloads."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _validate_approx_date_str(v: str | None) -> str | None:
@@ -39,7 +45,7 @@ ApproxDateStr = Annotated[
 """A date string with variable precision: None, YYYY, YYYY-MM, or YYYY-MM-DD."""
 
 
-class ApproxDate(BaseModel):
+class ApproxDate(_ToolArguments):
     """A date with variable precision."""
 
     date: str | None = Field(
@@ -56,7 +62,7 @@ class ApproxDate(BaseModel):
     )
 
 
-class FinishExtraction(BaseModel):
+class FinishExtraction(_ToolArguments):
     """
     Signal that extraction from the current note is complete.
     This MUST be called as the final tool for each note.
@@ -80,7 +86,7 @@ class FinishExtraction(BaseModel):
     )
 
 
-class FinishSingleExtraction(BaseModel):
+class FinishSingleExtraction(_ToolArguments):
     """
     Signal that extraction from this note is complete.
     Used in single-note workflows where each note is processed independently.
@@ -99,7 +105,7 @@ class FinishSingleExtraction(BaseModel):
     )
 
 
-class StopWorkflow(BaseModel):
+class StopWorkflow(_ToolArguments):
     """
     Signal that the entire workflow should stop (no more notes needed).
     Use this when you have high confidence that all required information has been extracted.
@@ -129,22 +135,24 @@ class NoteInfo(BaseModel):
     is_final_note: bool = False
 
 
-class ExtractionEvent(BaseModel):
+class ExtractionEvent(_ToolArguments):
     """Base class for extraction events. All tool outputs should inherit from this."""
 
     note_id: str = Field(
         ..., description="ID of the note this event was extracted from"
     )
-    comment: str = Field(
-        ...,
-        description="Important context, quotes, or rationale supporting this extraction.",
+    evidence: list[str] | str = Field(
+        default_factory=list,
+        description=(
+            "Brief list of exact source-note snippets supporting this extraction. "
+            "Snippets are provenance for the review UI and are not themselves "
+            "extracted values. Should match text in the note exactly for review "
+            "purposes, ideally with 1-2 words of context on either side."
+        ),
     )
 
-    class Config:
-        extra = "allow"  # Allow subclasses to add fields
 
-
-class ExtractionPlan(BaseModel):
+class ExtractionPlan(_ToolArguments):
     """Base class for plan tools — the model records its plan, not extracted data.
 
     Plans are serialized into a separate "plans" block in the JSONL output and
@@ -154,6 +162,3 @@ class ExtractionPlan(BaseModel):
     """
 
     note_id: str = Field(..., description="ID of the note this plan was generated for")
-
-    class Config:
-        extra = "allow"

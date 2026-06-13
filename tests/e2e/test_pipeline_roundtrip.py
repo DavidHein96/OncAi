@@ -222,16 +222,17 @@ def test_full_pipeline_with_fake_llm(pipeline_env: tuple[Path, OncaiConfig]) -> 
         == "radical nephrectomy"
     )
 
-    # === 4. JSONL + manifest back into inbox/fc_extractions ==============
-    inbox_fc = cfg.inbox_path / "fc_extractions"
-    shutil.copy2(jsonl_path, inbox_fc / "v1.jsonl")
-    shutil.copy2(manifest_path, inbox_fc / "v1_manifest.json")
+    # === 4. Promote the run's JSONL into a batch folder as segment 001 ====
+    # A batch is a folder of numbered segments: inbox/fc_extractions/<batch>/NNN.jsonl.
+    batch_dir = cfg.inbox_path / "fc_extractions" / "v1"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(jsonl_path, batch_dir / "001.jsonl")
+    shutil.copy2(manifest_path, batch_dir / "001_manifest.json")
 
     fc_ingest_results = run_ingest(cfg, folder="fc_extractions")
     assert len(fc_ingest_results) == 1
     lake_fc_parquet = cfg.lake_path / "fc_extractions" / "v1.parquet"
     assert lake_fc_parquet.exists()
-    assert (cfg.lake_path / "fc_extractions" / "v1_manifest.json").exists()
 
     # === 5. Rebuild DB and verify the extractions table is queryable =====
     db_counts2 = build_database(cfg, force=True)

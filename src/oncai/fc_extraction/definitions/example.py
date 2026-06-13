@@ -82,7 +82,7 @@ class TreatmentIntent(StrEnum):
 #
 # ExtractionEvent provides:
 #   - note_id: str | None  (auto-populated by the system)
-#   - comment: str | None  (for the LLM to record supporting evidence/quotes)
+#   - evidence: list[str] | str  (exact source snippets for review highlighting)
 #
 # Key principles:
 #   - Use clear, descriptive field names
@@ -151,6 +151,34 @@ class RecordTreatment(ExtractionEvent):
     )
 
 
+class FlagReportForReview(ExtractionEvent):
+    """Flag the report for human review when the structured tools cannot resolve it."""
+
+    comment: str = Field(
+        "",
+        description=(
+            "Optional extra context for the review flag. Put the specific "
+            "reason in reason and exact source-note snippets in review_anchor."
+        ),
+    )
+    reason: str = Field(
+        ...,
+        description=(
+            "Reason the report needs review. Use only for genuine ambiguity, "
+            "conflicting information, or wording that does not fit available "
+            "structured fields."
+        ),
+    )
+    review_anchor: list[str] = Field(
+        ...,
+        description=(
+            "Exact text snippets from the report that should be highlighted "
+            "and used as jump targets in the review app. Each item should be "
+            "an exact substring containing the ambiguity."
+        ),
+    )
+
+
 # =============================================================================
 # SYSTEM PROMPT
 # =============================================================================
@@ -165,7 +193,9 @@ Your task is to extract:
 
 EXTRACTION RULES:
 - Call a tool for each distinct finding in the report.
-- Use the 'comment' field to include supporting quotes from the report.
+- Put exact source-note snippets in `evidence`.
+- Call flag_report_for_review only for genuine ambiguity or conflicting text;
+  use comment for rationale and include exact report-level snippets in review_anchor.
 - Call finish_single_extraction when you have recorded every finding.
 
 DATE FORMAT:
@@ -199,6 +229,13 @@ def create_example_registry() -> ToolRegistry:
             "including the type, date, stage, and grade."
         ),
         model=RecordDiagnosis,
+        comparison_fields=(
+            "diagnosis_date",
+            "diagnosis_type",
+            "diagnosis_name",
+            "stage",
+            "grade",
+        ),
     )
 
     registry.register(
@@ -209,6 +246,23 @@ def create_example_registry() -> ToolRegistry:
             "etc."
         ),
         model=RecordTreatment,
+        comparison_fields=(
+            "treatment_date",
+            "treatment_name",
+            "treatment_type",
+            "intent",
+            "outcome",
+        ),
+    )
+
+    registry.register(
+        name="flag_report_for_review",
+        description=(
+            "Flag a report for human review when it is genuinely ambiguous or "
+            "contains conflicting text that the structured fields cannot resolve. "
+            "Include exact source-note snippets in review_anchor."
+        ),
+        model=FlagReportForReview,
     )
 
     return registry

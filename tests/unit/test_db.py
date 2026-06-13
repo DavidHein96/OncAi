@@ -50,6 +50,29 @@ class TestBuildDatabase:
         assert "raw.pathology" in results
         assert db_path.exists()
 
+    def test_creates_gold_review_table(self, tmp_path):
+        lake = tmp_path / "lake"
+        (lake / "fc_reviews").mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "event_key": ["N1::record_diagnosis::0"],
+                "event_type": ["record_diagnosis"],
+                "note_id": ["N1"],
+                "mrn": ["MRN001"],
+                "review_verdict": ["approved"],
+            }
+        ).write_parquet(lake / "fc_reviews" / "demo.parquet")
+
+        config = OncaiConfig(
+            remote_path=tmp_path / "remote",
+            lake_path=lake,
+            inbox_path=tmp_path / "inbox",
+            db_path=tmp_path / "test.duckdb",
+        )
+        results = build_database(config)
+
+        assert results["extractions_silver.demo"] == 1
+
 
 class TestGetDatabaseInfo:
     def test_returns_table_info(self, tmp_path):

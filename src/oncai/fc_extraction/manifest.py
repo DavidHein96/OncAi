@@ -9,8 +9,16 @@ version lookup, and a short hash function for prompt fingerprinting.
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from typing import Any
+
+# Engine-provided tools that aren't part of a definition's extraction contract —
+# excluded from the contract hash and tool-schema provenance so they don't make
+# every record look "changed" when the engine's builtins shift.
+_BUILTIN_TOOLS = frozenset(
+    {"finish_note_extraction", "stop_workflow", "finish_single_extraction"}
+)
 
 
 def _run_git(*args: str) -> str | None:
@@ -66,3 +74,45 @@ def get_code_version() -> str | None:
 def hash_string(s: str) -> str:
     """Create a short hash of a string."""
     return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def tool_schemas_for(registry: Any) -> dict[str, Any]:
+    """JSON schema of each task tool (engine builtins excluded).
+
+    The schema reflects the tool's Pydantic model — its fields, types, and enum
+    options — so it captures the part of the extraction contract that ``hash_string``
+    of the prompt alone misses.
+    """
+    out: dict[str, Any] = {}
+    for name in registry.list_tools():
+        if name in _BUILTIN_TOOLS:
+            continue
+        tool_def = registry.get(name)
+        if tool_def is not None:
+            out[name] = tool_def.model.model_json_schema()
+    return out
+
+
+def definition_hash(system_prompt: str, tool_schemas: dict[str, Any]) -> str:
+    """Hash the full extraction contract: system prompt + tool JSON schemas.
+
+    Unlike a prompt-only hash, this changes whenever a tool's Pydantic model
+    changes — a field added/removed/renamed, an enum's options edited — so the
+    incremental delta's change-detection re-extracts on *field* changes, not
+    just prompt edits. Schemas are serialised with sorted keys for stability.
+    """
+    payload = json.dumps(
+        {"system_prompt": system_prompt, "tool_schemas": tool_schemas},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def definition_hash_from_registry(system_prompt: str, registry: Any) -> str:
+    """``definition_hash`` over a registry's tools — the single source of truth.
+
+    Both the writer (run_meta, stamped per record) and the reader (the delta's
+    change-detection) call this, so the two sides always hash identically.
+    """
+    return definition_hash(system_prompt, tool_schemas_for(registry))

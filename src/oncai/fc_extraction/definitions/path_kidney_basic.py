@@ -17,12 +17,12 @@ Used with batch_single.py for single-note processing.
 from __future__ import annotations
 
 import logging
-import re
 from enum import StrEnum
 from typing import Annotated
 
 from pydantic import BeforeValidator, Field
 
+from ..enum_helpers import build_enum_lookup, normalize_against
 from ..models import ExtractionEvent, ExtractionPlan
 from ..tools import ToolRegistry
 
@@ -60,43 +60,20 @@ class PhysicianConfidence(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
-# =============================================================================
-# Normalization helpers
-# =============================================================================
-
-
-def _normalize_key(s: str) -> str:
-    """Reduce a string to a canonical comparison key by lowercasing and
-    stripping whitespace, hyphens, underscores, slashes, dots, and parens."""
-    return re.sub(r"[\s\-_./()]+", "", s).lower()
-
-
-def _build_enum_lookup(enum_cls: type[StrEnum]) -> dict[str, str]:
-    """Build a {normalized_key: enum_value} mapping for an entire StrEnum."""
-    return {_normalize_key(m.value): m.value for m in enum_cls}
-
-
-def _normalize_against(v: object, lookup: dict[str, str], field_name: str) -> str:
-    """Match a value against a normalized lookup; log when a correction is made."""
-    if isinstance(v, StrEnum):
-        return v.value
-    s = str(v).strip()
-    match = lookup.get(_normalize_key(s))
-    if match is not None and match != s:
-        logger.debug("normalizer fixed %s: %r -> %r", field_name, s, match)
-    return match if match is not None else s
-
-
-_CANCER_STATUS_LOOKUP = _build_enum_lookup(KidneyCancerStatus)
-_CONFIDENCE_LOOKUP = _build_enum_lookup(PhysicianConfidence)
+_CANCER_STATUS_LOOKUP = build_enum_lookup(KidneyCancerStatus)
+_CONFIDENCE_LOOKUP = build_enum_lookup(PhysicianConfidence)
 
 
 def normalize_kidney_cancer_status(v: object) -> str:
-    return _normalize_against(v, _CANCER_STATUS_LOOKUP, "kidney_cancer_status")
+    return normalize_against(
+        v, _CANCER_STATUS_LOOKUP, "kidney_cancer_status", logger=logger
+    )
 
 
 def normalize_confidence(v: object) -> str:
-    return _normalize_against(v, _CONFIDENCE_LOOKUP, "diagnostic_confidence")
+    return normalize_against(
+        v, _CONFIDENCE_LOOKUP, "diagnostic_confidence", logger=logger
+    )
 
 
 # =============================================================================
@@ -121,8 +98,8 @@ class TriageReport(ExtractionEvent):
         ...,
         description=(
             "True if the report contains a primary nephrectomy specimen "
-            "(radical, partial, or total). False otherwise. Routes the report to "
-            "the nephrectomy extraction workflow."
+            "(radical, partial, or total). False otherwise. "
+            "If the report describes a surgical resection of the kidney but does not explicitly say 'nephrectomy', call this TRUE if the description is consistent with a nephrectomy-level resection (e.g., large resection of kidney tissue with perinephric fat, variable length of ureter, or renal vessels). Additionally call true if the procedure is a 'Nephroureterectomy'"
         ),
     )
     has_biopsy: bool = Field(
@@ -204,9 +181,16 @@ class PlanTriage(ExtractionPlan):
     )
 
 
-class FlagReportForReview(ExtractionPlan):
+class FlagReportForReview(ExtractionEvent):
     """Flag the report for human review. Use sparingly."""
 
+    comment: str = Field(
+        "",
+        description=(
+            "Optional extra context for the review flag. Put the specific "
+            "reason in reason and exact source-note snippets in review_anchor."
+        ),
+    )
     reason: str = Field(
         ...,
         description=(
@@ -214,6 +198,15 @@ class FlagReportForReview(ExtractionPlan):
             "genuinely ambiguous (conflicting findings, atypical wording, "
             "no clear specimen type). Routine 'uncertain' or 'not specified' "
             "cases do NOT warrant a flag."
+        ),
+    )
+    review_anchor: list[str] = Field(
+        ...,
+        description=(
+            "Exact text snippets from the report that should be highlighted "
+            "and used as jump targets in the review app. Each item should be "
+            "an exact substring containing the ambiguity. If several sections "
+            "are relevant, include multiple anchors."
         ),
     )
 
@@ -279,7 +272,7 @@ Molecular / translocation subtypes (all RCC; aggressiveness varies):
 - TFEB-altered RCC (formerly "t(6;11) RCC")
 - ELOC-mutated RCC (formerly TCEB1-mutated)
 - ALK-rearranged RCC
-- SDH-deficient renal carcinoma
+- SDH-deficient renal cell carcinoma
 
 Less common, generally indolent RCC subtypes:
 - Mucinous tubular and spindle renal cell carcinoma
@@ -287,7 +280,7 @@ Less common, generally indolent RCC subtypes:
 - Tubulocystic renal cell carcinoma
 - Acquired cystic disease-associated renal cell carcinoma
 - Clear cell papillary renal cell tumor
-- Multilocular cystic clear cell RCC of low malignant potential
+- Multilocular cystic renal neoplasm of low malignant potential
 
 Unclassified / pending (still RCC):
 - Renal cell carcinoma, NOS / unclassified
@@ -298,6 +291,8 @@ Modernized name aliases:
 - "Xp11 translocation RCC" → TFE3-rearranged RCC
 - "Hereditary leiomyomatosis-associated RCC" / "HLRCC" → FH-deficient RCC
 - "t(6;11) RCC" → TFEB-altered RCC
+- "Clear cell papillary RCC" / "clear cell papillary renal cell carcinoma" → Clear cell papillary renal cell tumor (reclassified from a carcinoma to an indolent "tumor" in WHO 2022)
+- "Papillary RCC, type 1 / type 2" → Papillary renal cell carcinoma (type 1/type 2 subtyping no longer used in WHO 2022)
 - "SMARCB1" is sometimes called "INI-1"
 
 ## BENIGN RENAL NEOPLASMS — pick `benign neoplasm of kidney`
@@ -340,12 +335,20 @@ specific malignant RCC subtype:
 - `suspicious` — "suggestive of" / "cannot exclude" / "favored" wording.
 - `indeterminate` — pathologist explicitly says cannot determine.
 
+# CONTAINS NEPHRECTOMY
+- If the report does not explicitly say "nephrectomy" but describes a surgical resection of kidney tissue, call `has_primary_nephrectomy` TRUE. This includes cases where the pathologist describes a large resection of kidney tissue with features like perinephric fat or adrenal involvement, even if the word "nephrectomy" is not used.
+- Also call true for "Nephroureterectomy"
+
+## PROVENANCE
+- Use `evidence` for exact source-note snippets supporting the extraction.
+- Use `review_anchor` only for report-level snippets explaining a human review flag.
 
 ## FLAGGING
 Use `flag_report_for_review` only when:
 - Conflicting information between sections that addenda do not resolve.
 - Report wording does not fit any kidney_cancer_status value.
 - Specimen type is genuinely unclear (extremely rare).
+- Make sure review_anchor snippets match the report text exactly so they can be highlighted in the review interface.
 Do NOT flag for routine 'uncertain' or 'not specified' calls.
 """
 
@@ -382,6 +385,14 @@ def create_path_kidney_basic_registry() -> ToolRegistry:
             "in other workflows."
         ),
         model=TriageReport,
+        comparison_fields=(
+            "has_primary_nephrectomy",
+            "has_biopsy",
+            "has_metastasectomy",
+            "has_ihc_or_molecular",
+            "kidney_cancer_status",
+            "diagnostic_confidence",
+        ),
     )
 
     registry.register(

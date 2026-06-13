@@ -36,7 +36,7 @@ Why:
 
 ## Single-Note Scope
 
-This toolkit deliberately targets the **one-report-in / one-record-out** case (pathology reports, radiology reports, etc.) rather than longitudinal multi-note extraction. Single-note workflows have a simpler contract: every input has a stable `record_id`, the extraction is a pure function of the report text + the system prompt, and resumes/incrementals reduce to a hash anti-join. Multi-note workflows (where a "record" is a patient timeline assembled across dozens of encounters) need a different state model and are out of scope here.
+This toolkit deliberately targets the **one-report-in / one-record-out** case (pathology reports, radiology reports, etc.) rather than longitudinal multi-note extraction. Single-note workflows have a simpler contract: every input has a stable `record_id`, the extraction is a pure function of the report text + the definition (system prompt **and** the tools' Pydantic schemas), and resumes/incrementals reduce to a hash anti-join against the batch's existing segments. Multi-note workflows (where a "record" is a patient timeline assembled across dozens of encounters) need a different state model and are out of scope here.
 
 ## DuckDB for Everything
 

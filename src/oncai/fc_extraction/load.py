@@ -3,15 +3,16 @@ FC extraction JSONL helpers.
 
 Two consumers:
 
-- ``oncai ingest fc_extractions`` uses ``merge_versioned_jsonls_to_parquet``
-  (which in turn drives ``jsonl_to_wide_parquet`` per version) to merge a
-  baseline JSONL and its ``.v<N>`` siblings into a single wide
-  row-per-record parquet at ``lake/fc_extractions/<base>.parquet``. Events /
-  finish / run_meta are preserved verbatim as JSON strings; SQL reshaping
-  happens at db-build time via sibling ``<parquet_stem>.sql`` files.
-- ``oncai fc stage`` uses ``_load_fc_records`` + ``_flatten_fc_single_record``
-  for ad-hoc exploration of un-curated runs in a per-batch staging duckdb
-  schema.
+- ``oncai ingest fc_extractions`` uses ``merge_segments_to_parquet`` (which
+  drives ``jsonl_to_wide_parquet`` per segment) to merge a batch's numbered
+  segments (``inbox/fc_extractions/<batch>/NNN.jsonl``) into a single wide
+  row-per-record parquet at ``lake/fc_extractions/<batch>.parquet``. For each
+  ``record_id`` the highest segment wins — explicit integer order, no
+  timestamps. Events / finish / run_meta are preserved verbatim as JSON
+  strings; SQL reshaping happens at db-build time via sibling
+  ``<parquet_stem>.sql`` files.
+- ``oncai fc peek`` uses ``_load_fc_records`` + ``_flatten_fc_single_record``
+  for a quick look at a JSONL in the throwaway ``scratch`` duckdb schema.
 """
 
 from __future__ import annotations
@@ -260,6 +261,8 @@ def jsonl_to_wide_parquet(
     *,
     only_successful: bool = True,
     dry_run: bool = False,
+    batch_name: str | None = None,
+    segment: int | None = None,
 ) -> WideLoadResult:
     """Convert an FC extraction JSONL into a wide one-row-per-record parquet.
 
@@ -285,9 +288,11 @@ def jsonl_to_wide_parquet(
         return result
 
     result.record_kind = "single_note"
-    # batch_name reflects the SOURCE JSONL's stem so multi-version merges
-    # (foo.jsonl + foo.v2.jsonl → foo.parquet) preserve per-row provenance.
-    batch_name = jsonl_path.stem
+    # Provenance: the merge passes the batch (folder) name + the integer
+    # segment, so each row records exactly which segment produced it. Falling
+    # back to the JSONL stem keeps the standalone / peek path working.
+    if batch_name is None:
+        batch_name = jsonl_path.stem
 
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -315,6 +320,7 @@ def jsonl_to_wide_parquet(
                 "record_kind": "single_note",
                 "definition_name": record.get("definition_name", ""),
                 "batch_name": batch_name,
+                "segment": segment,
                 "success": True,
                 "rounds": int(record.get("rounds") or 0),
                 "input_tokens": int(record.get("input_tokens") or 0),
@@ -343,6 +349,7 @@ def jsonl_to_wide_parquet(
             "record_kind": pl.String,
             "definition_name": pl.String,
             "batch_name": pl.String,
+            "segment": pl.Int64,
             "success": pl.Boolean,
             "rounds": pl.Int32,
             "input_tokens": pl.Int64,
@@ -385,38 +392,62 @@ def jsonl_to_wide_parquet(
     return result
 
 
-def merge_versioned_jsonls_to_parquet(
-    jsonl_paths: list[Path],
+_SEGMENT_RE = re.compile(r"^(\d+)\.jsonl$")
+
+
+def segment_files(batch_dir: Path) -> list[tuple[int, Path]]:
+    """Return ``(segment_number, path)`` for each ``NNN.jsonl`` in a batch dir.
+
+    Sorted ascending by the integer. Non-segment files (manifests, ``.partial``,
+    sidecars, ``batch.json``) are ignored.
+    """
+    if not batch_dir.exists():
+        return []
+    out: list[tuple[int, Path]] = []
+    for p in batch_dir.iterdir():
+        m = _SEGMENT_RE.match(p.name)
+        if m:
+            out.append((int(m.group(1)), p))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def merge_segments_to_parquet(
+    batch_dir: Path,
     output_path: Path,
     *,
     only_successful: bool = True,
     dry_run: bool = False,
 ) -> WideLoadResult:
-    """Merge multiple versioned JSONLs (e.g. ``foo.jsonl`` + ``foo.v2.jsonl``)
-    into a single wide parquet, keeping the latest ``extracted_at`` per
-    ``record_id``.
+    """Merge a batch's numbered segments into one wide parquet.
 
-    Each row's ``batch_name`` field tracks its source JSONL stem, so the
-    resulting parquet preserves per-row provenance — querying
-    ``extractions_raw.<batch>`` shows which version each record came from.
+    A batch is a folder of immutable, monotonically-numbered segments
+    (``NNN.jsonl``). For each ``record_id`` the **highest segment that contains
+    it wins** — a later re-extraction supersedes an earlier one. Ordering is the
+    explicit segment integer, so the result is deterministic and never depends
+    on wall-clock ``extracted_at``. Each row carries ``batch_name`` (the folder)
+    and ``segment`` (the integer) for provenance.
 
-    Returns a ``WideLoadResult`` whose ``total_records`` and ``written``
-    counts reflect the *post-merge* numbers (i.e. unique ``record_id``s
-    after deduplication), not the raw input record count.
+    ``total_records``/``written`` reflect the *post-merge* numbers (unique
+    ``record_id``s), not the raw input count.
     """
-    if not jsonl_paths:
+    segments = segment_files(batch_dir)
+    if not segments:
         return WideLoadResult(total_records=0, output_path=output_path)
 
-    # Build per-file DataFrames in dry_run mode, then concatenate. Calling
-    # jsonl_to_wide_parquet per file gives us the stable wide schema for
-    # free, including the JSONL-stem-derived batch_name.
+    batch = batch_dir.name
     frames: list[pl.DataFrame] = []
     total_input = 0
     total_skipped_failed = 0
     record_kind: str | None = None
-    for p in jsonl_paths:
+    for seg_num, path in segments:
         sub = jsonl_to_wide_parquet(
-            p, output_path, only_successful=only_successful, dry_run=True
+            path,
+            output_path,
+            only_successful=only_successful,
+            dry_run=True,
+            batch_name=batch,
+            segment=seg_num,
         )
         total_input += sub.total_records
         total_skipped_failed += sub.skipped_failed
@@ -437,14 +468,10 @@ def merge_versioned_jsonls_to_parquet(
 
     combined = pl.concat(frames, how="vertical_relaxed")
 
-    # Latest extracted_at per record_id wins. Falls back to lexicographic
-    # batch_name as a tie-breaker so identical timestamps are still
-    # deterministic (`foo.v2` > `foo`).
+    # Highest segment per record_id wins — pure integer order, no clocks.
     deduped = (
         combined.sort(
-            ["record_id", "extracted_at", "batch_name"],
-            descending=[False, True, True],
-            nulls_last=True,
+            ["record_id", "segment"], descending=[False, True], nulls_last=True
         )
         .unique(subset=["record_id"], keep="first")
         .sort("record_id")

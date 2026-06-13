@@ -50,11 +50,11 @@ _COMPARE_KEYS = (
 )
 
 
-def _get_run_or_exit(lake_path: Path, run_id: str) -> dict:
+def _get_run_or_exit(inbox_path: Path, run_id: str) -> dict:
     """Look up a run by id (prefix-matched). Exits with code 1 if not found."""
     from oncai.runs import get_run
 
-    row = get_run(lake_path, run_id)
+    row = get_run(inbox_path, run_id)
     if row is None:
         console.print(f"[red]Run not found: {run_id}[/red]")
         raise typer.Exit(1)
@@ -75,7 +75,7 @@ def runs_list(
     from oncai.runs import list_runs
 
     config = get_config()
-    df = list_runs(config.lake_path, run_type=run_type, limit=limit)
+    df = list_runs(config.inbox_path, run_type=run_type, limit=limit)
 
     if df.height == 0:
         console.print("[yellow]No runs found.[/yellow]")
@@ -123,7 +123,7 @@ def runs_show(
 ):
     """Show full details for a run."""
     config = get_config()
-    row = _get_run_or_exit(config.lake_path, run_id)
+    row = _get_run_or_exit(config.inbox_path, run_id)
 
     console.print(f"\n[bold]Run {row['run_id']}[/bold]")
 
@@ -150,8 +150,8 @@ def runs_compare(
 ):
     """Compare two runs side-by-side, highlighting differences."""
     config = get_config()
-    run1 = _get_run_or_exit(config.lake_path, id1)
-    run2 = _get_run_or_exit(config.lake_path, id2)
+    run1 = _get_run_or_exit(config.inbox_path, id1)
+    run2 = _get_run_or_exit(config.inbox_path, id2)
 
     table = Table(title=f"Compare: {run1['run_id']} vs {run2['run_id']}")
     table.add_column("field")

@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+.turbo/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Generated files
+*.min.js
+*.min.css
+pnpm-lock.yaml
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+
+# Misc
+coverage/
+.nyc_output/
+*.log
+
+# Old stuff
+
+archive/*
+static_demos/*
+
+# Personal scratch dirs — local notes, log dumps, drafts
+*-scratch/
+
+# No prettier parser for these
+Makefile
+.python-version

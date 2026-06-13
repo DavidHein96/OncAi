@@ -14,12 +14,16 @@ Used with batch_single.py for single-note processing.
 from __future__ import annotations
 
 import logging
-import re
 from enum import StrEnum
 from typing import Annotated
 
 from pydantic import BeforeValidator, Field
 
+from oncai.fc_extraction.enum_helpers import (
+    build_enum_lookup,
+    build_literal_lookup,
+    normalize_against,
+)
 from oncai.fc_extraction.models import ExtractionEvent, ExtractionPlan
 from oncai.fc_extraction.tools import ToolRegistry
 
@@ -54,7 +58,7 @@ class ProcedureType(StrEnum):
 class HistologicType(StrEnum):
     CLEAR_CELL_RCC = "Clear cell renal cell carcinoma"
     MULTILOCULAR_CYSTIC = (
-        "Multilocular cystic clear cell renal cell neoplasm of low malignant potential"
+        "Multilocular cystic renal neoplasm of low malignant potential"
     )
     PAPILLARY_RCC = "Papillary renal cell carcinoma"
     CHROMOPHOBE_RCC = "Chromophobe renal cell carcinoma"
@@ -72,7 +76,7 @@ class HistologicType(StrEnum):
     TUBULOCYSTIC = "Tubulocystic renal cell carcinoma"
     ACD_ASSOCIATED = "Acquired cystic disease-associated renal cell carcinoma"
     CLEAR_CELL_PAPILLARY = "Clear cell papillary renal cell tumor"
-    SDH_DEFICIENT = "Succinate dehydrogenase-deficient (SDH) renal carcinoma"
+    SDH_DEFICIENT = "Succinate dehydrogenase-deficient (SDH) renal cell carcinoma"
     FH_DEFICIENT = "Fumarate hydratase-deficient renal cell carcinoma"
     ALK_REARRANGED = "ALK-rearranged renal cell carcinoma"
     SUBTYPE_PENDING = "Renal cell carcinoma, subtype pending additional studies"
@@ -248,70 +252,46 @@ class LymphNodeType(StrEnum):
     NOT_SPECIFIED = "Not specified"
 
 
-# =============================================================================
-# Normalization helpers
-# =============================================================================
-
-
-def _normalize_key(s: str) -> str:
-    """Reduce a string to a canonical comparison key by lowercasing and
-    stripping whitespace, hyphens, underscores, slashes, dots, and parens."""
-    return re.sub(r"[\s\-_./()]+", "", s).lower()
-
-
-def _build_enum_lookup(enum_cls: type[StrEnum]) -> dict[str, str]:
-    """Build a {normalized_key: enum_value} mapping for an entire Enum."""
-    return {_normalize_key(m.value): m.value for m in enum_cls}
-
-
-def _build_literal_lookup(values: tuple[str, ...]) -> dict[str, str]:
-    """Build a {normalized_key: canonical_value} mapping for a Literal-style tuple."""
-    return {_normalize_key(v): v for v in values}
-
-
-def _normalize_against(v: object, lookup: dict[str, str], field_name: str) -> str:
-    """Match a value against a normalized lookup; log when a correction is made."""
-    if isinstance(v, StrEnum):
-        return v.value
-    s = str(v).strip()
-    match = lookup.get(_normalize_key(s))
-    if match is not None and match != s:
-        logger.debug("normalizer fixed %s: %r -> %r", field_name, s, match)
-    return match if match is not None else s
-
-
-_PROCEDURE_TYPE_LOOKUP = _build_enum_lookup(ProcedureType)
-_HISTOLOGIC_TYPE_LOOKUP = _build_enum_lookup(HistologicType)
-_PHYSICIAN_CONFIDENCE_LOOKUP = _build_enum_lookup(PhysicianConfidence)
-_ANATOMICAL_SITE_LOOKUP = _build_enum_lookup(AnatomicalSiteBroad)
-_LYMPH_NODE_TYPE_LOOKUP = _build_enum_lookup(LymphNodeType)
+_PROCEDURE_TYPE_LOOKUP = build_enum_lookup(ProcedureType)
+_HISTOLOGIC_TYPE_LOOKUP = build_enum_lookup(HistologicType)
+_PHYSICIAN_CONFIDENCE_LOOKUP = build_enum_lookup(PhysicianConfidence)
+_ANATOMICAL_SITE_LOOKUP = build_enum_lookup(AnatomicalSiteBroad)
+_LYMPH_NODE_TYPE_LOOKUP = build_enum_lookup(LymphNodeType)
 
 _SITUATION_VALUES = ("metastatic finding", "recurrence")
-_SITUATION_LOOKUP = _build_literal_lookup(_SITUATION_VALUES)
+_SITUATION_LOOKUP = build_literal_lookup(_SITUATION_VALUES)
 
 
 def normalize_procedure_type(v: object) -> str:
-    return _normalize_against(v, _PROCEDURE_TYPE_LOOKUP, "procedure_type")
+    return normalize_against(v, _PROCEDURE_TYPE_LOOKUP, "procedure_type", logger=logger)
 
 
 def normalize_histologic_type(v: object) -> str:
-    return _normalize_against(v, _HISTOLOGIC_TYPE_LOOKUP, "histologic_type")
+    return normalize_against(
+        v, _HISTOLOGIC_TYPE_LOOKUP, "histologic_type", logger=logger
+    )
 
 
 def normalize_physician_confidence(v: object) -> str:
-    return _normalize_against(v, _PHYSICIAN_CONFIDENCE_LOOKUP, "confidence_level")
+    return normalize_against(
+        v, _PHYSICIAN_CONFIDENCE_LOOKUP, "confidence_level", logger=logger
+    )
 
 
 def normalize_anatomical_site(v: object) -> str:
-    return _normalize_against(v, _ANATOMICAL_SITE_LOOKUP, "anatomical_site")
+    return normalize_against(
+        v, _ANATOMICAL_SITE_LOOKUP, "anatomical_site", logger=logger
+    )
 
 
 def normalize_lymph_node_type(v: object) -> str:
-    return _normalize_against(v, _LYMPH_NODE_TYPE_LOOKUP, "lymph_node_type")
+    return normalize_against(
+        v, _LYMPH_NODE_TYPE_LOOKUP, "lymph_node_type", logger=logger
+    )
 
 
 def normalize_situation(v: object) -> str:
-    return _normalize_against(v, _SITUATION_LOOKUP, "situation")
+    return normalize_against(v, _SITUATION_LOOKUP, "situation", logger=logger)
 
 
 # =============================================================================
@@ -473,16 +453,26 @@ class PlanSpecimens(ExtractionPlan):
 class FlagReportForReview(ExtractionEvent):
     """Flag a report for manual review by a human expert."""
 
+    comment: str = Field(
+        "",
+        description=(
+            "Optional extra context for the review flag. Put the specific "
+            "reason in reason and exact source-note snippets in review_anchor."
+        ),
+    )
     reason: str = Field(
         ...,
         description=(
             "Reason for flagging this report for review, 'conflicting information', or 'multiple possible interpretations'. This should only be used for cases where the report is genuinely ambiguous or complex and cannot be reliably extracted with the current toolset"
         ),
     )
-    flagged_text: str = Field(
+    review_anchor: list[str] = Field(
         ...,
         description=(
-            "The specific text in the report that triggered the flag, quoted verbatim for review. If multiple distinct text passages contributed, join them with ' || ' delimiter."
+            "Exact text snippets from the report that should be highlighted "
+            "and used as jump targets in the review app. Each item should be "
+            "an exact substring containing the ambiguity. If several sections "
+            "are relevant, include multiple anchors."
         ),
     )
 
@@ -534,6 +524,10 @@ For each report:
 - For the detail strings that are meant to be verbatim quotes from the report, try to capture the exact wording as much as possible, including any descriptive qualifiers. If multiple sentences must be joined to capture the full detail, join them with a ' || ' delimiter. Use a few words before and after the key language to help capture the string so it can be easily matched back on audit.
 - If there are multiple sentences that describe the exact same finding, only pick one representative sentence for the detail string and ignore the rest to avoid redundancy.
 
+## PROVENANCE
+- Use `evidence` for exact source-note snippets supporting the extraction.
+- Detail-string fields are extracted values; `evidence` is separate review provenance.
+
 ## ANATOMICAL SITE — META RULES
 - Histology does NOT determine site. RCC metastatic to lung is anatomically Lung,
   not Kidney.
@@ -570,6 +564,13 @@ For each report:
 - "Renal medullary carcinoma" / RMC (classically in patients with sickle cell
   trait or disease; loss of SMARCB1 / INI-1 by IHC) → SMARCB1-deficient renal
   medullary carcinoma
+- "Clear cell papillary renal cell carcinoma" / "clear cell papillary RCC" /
+  "clear cell tubulopapillary RCC" → Clear cell papillary renal cell tumor
+  (WHO 2022 reclassified this indolent entity from a carcinoma to a "tumor";
+  the older "carcinoma" wording in a report maps to the same value).
+- "Papillary RCC, type 1" / "type 2" / "type 1 and 2" → Papillary renal cell
+  carcinoma (WHO 2022 no longer subdivides papillary RCC into types 1 and 2;
+  drop the type designation and assign the single Papillary renal cell carcinoma value).
 - 'Renal cell carcinoma, NOS (unclassified)' ->  used when classification to a subtype is difficult due to complex or borderline histological features
 - 'Renal cell carcinoma, no subtype specified' -> used when the pathologist simply does not provide a subtype and only refers to the histology as renal cell carcinoma.
 
@@ -578,6 +579,8 @@ For each report:
 Use `flag_report_for_review` sparingly — only for genuinely conflicting information,
 multiple plausible interpretations the enums cannot capture, or wording so atypical
 that no listed value fits. Routine "Not specified" cases do NOT warrant a flag.
+When flagging, populate review_anchor with exact report text snippets
+the review app can highlight and jump to.
 """
 
 
@@ -592,8 +595,6 @@ def create_path_kidney_proc_site_hist_registry() -> ToolRegistry:
     Workflow: plan_specimens → plan_specimen_findings (per specimen) →
     record_specimen_findings (per specimen) → finish_note_extraction.
     flag_report_for_review is optional and only for genuinely ambiguous cases.
-
-    NOTE: ledger_fields have no effect in single-note mode.
     """
     registry = ToolRegistry(single_note=True)
 
@@ -628,6 +629,14 @@ def create_path_kidney_proc_site_hist_registry() -> ToolRegistry:
             "Call ONCE per sub-specimen, AFTER plan_specimen_findings for that specimen."
         ),
         model=RecordSpecimenFindings,
+        event_identity_fields=("sub_specimen_label",),
+        comparison_fields=(
+            "anatomical_site",
+            "lymph_node_type",
+            "procedure_type",
+            "histologic_type",
+            "histology_confidence_level",
+        ),
     )
 
     registry.register(

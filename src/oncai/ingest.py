@@ -5,7 +5,9 @@ Dispatches per-folder based on ``FOLDER_MODES``:
 - ``DATED``: replay all ISO-prefixed inbox files in date order, rebuilding
   ``lake/<folder>/<folder>.parquet`` from scratch via key/content-hash merge.
 - ``STATIC``: each inbox file maps to its own lake parquet (filename stem
-  becomes the parquet name and the eventual duckdb table name).
+  becomes the parquet name and the eventual duckdb table name). Review
+  packages are the one exception: a ``*.review_pkg.json`` + ``*.reviews.jsonl``
+  pair maps to one reviewed (silver) parquet.
 - ``NAMED``: filename = identity (cohorts).
 - ``LAKE_ONLY``: skipped — these folders are populated by other paths.
 
@@ -16,7 +18,6 @@ Cross-folder relational SQL lives in ``oncai.db`` (the duckdb build).
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -307,64 +308,42 @@ def _transform_pathology(path: Path) -> tuple[pl.DataFrame, list[str]]:
 # --- STATIC: fc_extractions ---------------------------------------------
 
 
-_BATCH_VERSION_SUFFIX = re.compile(r"\.v\d+$")
-
-
-def _base_batch_name(jsonl_stem: str) -> str:
-    """Strip a trailing ``.v<N>`` from a JSONL stem to get the base batch name.
-
-    ``foo.jsonl`` → ``foo``; ``foo.v2.jsonl`` → ``foo``; ``foo.v17.jsonl`` →
-    ``foo``. Anything else (including names with embedded dots that aren't
-    a version suffix, like ``foo.bar``) is returned unchanged.
-    """
-    return _BATCH_VERSION_SUFFIX.sub("", jsonl_stem)
-
-
 def _ingest_fc_extractions(
     config: OncaiConfig, *, dry_run: bool = False
 ) -> FolderResult:
-    """fc_extractions: group inbox JSONLs by base batch name, merge each group
-    into one wide lake parquet, keeping the latest ``extracted_at`` per
-    ``record_id``.
+    """fc_extractions: each batch is a folder of numbered segments.
 
-    JSONLs ending in ``.v<N>.jsonl`` (e.g. ``foo.v2.jsonl``) are grouped with
-    their baseline ``foo.jsonl`` and any other versions, all collapsed into
-    ``lake/fc_extractions/foo.parquet``. Each row's ``batch_name`` column
-    tracks its source JSONL stem so per-version provenance survives the merge.
+    ``inbox/fc_extractions/<batch>/NNN.jsonl`` are immutable, monotonically
+    numbered segments. They merge into one wide lake parquet
+    ``lake/fc_extractions/<batch>.parquet`` where, for each ``record_id``, the
+    highest segment wins (explicit integer order — no timestamps). The batch
+    folder name becomes the parquet name and (after
+    ``oncai db update fc_extractions``) the table name in ``extractions_raw``.
 
-    Failed records are dropped from the lake parquet — diagnostics live in
-    the per-version manifest + ``oncai fc status``.
-
-    The base batch name the user gives in inbox becomes the parquet name
-    and (after ``oncai db update fc_extractions``) the table name in the
-    ``extractions_raw`` duckdb schema.
+    Failed records are dropped from the lake parquet — diagnostics live in the
+    per-segment manifest + ``oncai fc status``. Manifests stay in the inbox
+    (canonical, synced); the lake is a disposable projection.
     """
-    from oncai.fc_extraction.load import merge_versioned_jsonls_to_parquet
+    from oncai.fc_extraction.load import merge_segments_to_parquet, segment_files
 
     folder = "fc_extractions"
     inbox_dir = config.inbox_path / folder
-    files = sorted(
-        _collect_inbox_files(inbox_dir, extensions=(".jsonl",)), key=lambda p: p.name
-    )
-    _ensure_sidecars(files)
-
-    # Group by base batch name. Versions within a group are sorted so that
-    # higher-N variants come last — the merge tie-breaker prefers the
-    # higher-version source on identical extracted_at timestamps.
-    groups: dict[str, list[Path]] = {}
-    for f in files:
-        groups.setdefault(_base_batch_name(f.stem), []).append(f)
-    for v in groups.values():
-        v.sort(key=lambda p: p.name)
-
     result = FolderResult(folder=folder, mode=IngestMode.STATIC)
-    for batch_name, jsonl_files in groups.items():
-        out = config.lake_path / folder / f"{batch_name}.parquet"
+    if not inbox_dir.exists():
+        return result
 
-        # Build the would-be merged DataFrame in memory first (dry_run=True)
-        # so the delta diffs against the on-disk parquet BEFORE we write.
-        load_result = merge_versioned_jsonls_to_parquet(
-            jsonl_files, out, only_successful=True, dry_run=True
+    for batch_dir in sorted(p for p in inbox_dir.iterdir() if p.is_dir()):
+        batch_name = batch_dir.name
+        segments = segment_files(batch_dir)
+        if not segments:
+            continue
+        _ensure_sidecars([p for _, p in segments])
+
+        out = config.lake_path / folder / f"{batch_name}.parquet"
+        # Build the merged DataFrame in memory first (dry_run) so the delta
+        # diffs against the on-disk parquet BEFORE we write.
+        load_result = merge_segments_to_parquet(
+            batch_dir, out, only_successful=True, dry_run=True
         )
 
         if load_result.df is not None:
@@ -374,32 +353,9 @@ def _ingest_fc_extractions(
                 result.row_count += load_result.written
                 result.written_paths.append(out)
 
-        # Per-version manifests stay separate — each <stem>_manifest.json is
-        # copied to the lake folder under its own name. That preserves the
-        # provenance trail for each individual run.
-        for f in jsonl_files:
-            manifest_src = f.with_name(f.stem + "_manifest.json")
-            manifest_dst = config.lake_path / folder / manifest_src.name
-            if manifest_src.exists():
-                if not dry_run:
-                    manifest_dst.parent.mkdir(parents=True, exist_ok=True)
-                    import shutil
-
-                    shutil.copy2(manifest_src, manifest_dst)
-                    result.written_paths.append(manifest_dst)
-                result.notes.append(f"{f.name}: copied manifest")
-            else:
-                result.notes.append(
-                    f"{f.name}: no manifest peer found (provenance metadata unavailable)"
-                )
-
         result.files.append(
             FileStats(
-                name=(
-                    jsonl_files[0].name
-                    if len(jsonl_files) == 1
-                    else f"{batch_name} ({len(jsonl_files)} versions)"
-                ),
+                name=f"{batch_name} ({len(segments)} segment(s))",
                 new_rows=load_result.written,
                 updated_rows=0,
                 # Failures don't appear in the parquet — report them via the
@@ -410,10 +366,163 @@ def _ingest_fc_extractions(
         if load_result.skipped_failed:
             result.notes.append(
                 f"{batch_name}: dropped {load_result.skipped_failed} failed record(s) "
-                f"across {len(jsonl_files)} version(s)"
+                f"across {len(segments)} segment(s)"
             )
         if load_result.record_kind:
             result.notes.append(f"{batch_name}: detected {load_result.record_kind}")
+    return result
+
+
+# --- STATIC: fc_reviews -------------------------------------------------
+
+
+def _ingest_fc_reviews(config: OncaiConfig, *, dry_run: bool = False) -> FolderResult:
+    """fc_reviews: pair per-segment review packages with raw segments and logs.
+
+    Drop ``<batch>.NNN.review_pkg.json`` + ``<batch>.NNN.reviews.jsonl`` into
+    ``inbox/fc_reviews/``. The raw extraction segment at
+    ``inbox/fc_extractions/<batch>/NNN.jsonl`` supplies the complete event set;
+    the package supplies only the human worklist; the review log supplies
+    latest-``reviewed_at``-wins verdicts and edits. Reviewed (silver) rows from
+    all of a batch's segments merge (highest segment per ``note_id``) into one
+    ``lake/fc_reviews/<batch>.parquet`` → ``extractions_silver.<batch>``.
+
+    Any incomplete or invalid review batch aborts the ingest with an error
+    naming each offender — silver is never built from a half-reviewed batch.
+    """
+    import re
+
+    from oncai.review.load import (
+        REVIEW_LOG_SUFFIX,
+        REVIEW_PACKAGE_SUFFIX,
+        ReviewLoadResult,
+        merge_silver_segments,
+        review_batch_name,
+        review_to_silver_df,
+    )
+
+    folder = "fc_reviews"
+    inbox_dir = config.inbox_path / folder
+    result = FolderResult(folder=folder, mode=IngestMode.STATIC)
+    # One canonical layout: every pair lives in a batch-named folder,
+    # inbox/fc_reviews/<batch>/<batch>.NNN.review_pkg.json (written by the run
+    # hook). Glob exactly one level deep — files dropped flat are not picked up.
+    package_files = sorted(inbox_dir.glob(f"*/*{REVIEW_PACKAGE_SUFFIX}"))
+    review_files = sorted(inbox_dir.glob(f"*/*{REVIEW_LOG_SUFFIX}"))
+    _ensure_sidecars(package_files + review_files)
+
+    packages = {review_batch_name(p): p for p in package_files}
+    reviews = {review_batch_name(p): p for p in review_files}
+
+    seg_suffix = re.compile(r"^(.*)\.(\d+)$")
+
+    def _base_and_segment(name: str) -> tuple[str, int] | None:
+        m = seg_suffix.match(name)
+        if not m:
+            return None
+        return m.group(1), int(m.group(2))
+
+    def _raw_segment_path(base: str, seg: int) -> Path:
+        return config.inbox_path / "fc_extractions" / base / f"{seg:03d}.jsonl"
+
+    # Group each segment's (package, reviews) pair under its base batch name.
+    grouped: dict[str, list[tuple[int, Path, Path]]] = {}
+    for review_batch in sorted(set(packages) | set(reviews)):
+        package_path = packages.get(review_batch)
+        reviews_path = reviews.get(review_batch)
+        if package_path is None:
+            result.notes.append(
+                f"{review_batch}: missing {REVIEW_PACKAGE_SUFFIX} peer "
+                f"for {reviews_path.name if reviews_path is not None else 'review log'}"
+            )
+            continue
+        if reviews_path is None:
+            result.notes.append(
+                f"{review_batch}: missing {REVIEW_LOG_SUFFIX} peer "
+                f"for {package_path.name}"
+            )
+            continue
+        batch_key = _base_and_segment(review_batch)
+        if batch_key is None:
+            result.notes.append(
+                f"{review_batch}: review files must be named "
+                f"<batch>.NNN{REVIEW_PACKAGE_SUFFIX} and "
+                f"<batch>.NNN{REVIEW_LOG_SUFFIX}"
+            )
+            continue
+        base, seg = batch_key
+        grouped.setdefault(base, []).append((seg, package_path, reviews_path))
+
+    # Phase 1: build + validate each base batch's segments. A batch whose present
+    # segments are all complete is queued to write; a batch with any present-but-
+    # incomplete (or invalid) segment is recorded as a failure that fails ITSELF,
+    # not its siblings. (A package with no reviews log at all was already skipped
+    # above — you just can't build its silver yet, and that stops nothing.)
+    built: dict[str, list[tuple[int, ReviewLoadResult]]] = {}
+    failures: list[str] = []
+    for base, segs in grouped.items():
+        base_results: list[tuple[int, ReviewLoadResult]] = []
+        base_failures: list[str] = []
+        for seg, package_path, reviews_path in sorted(segs, key=lambda t: t[0]):
+            raw_jsonl_path = _raw_segment_path(base, seg)
+            if not raw_jsonl_path.exists():
+                base_failures.append(
+                    f"{package_path.name}: missing raw extraction segment "
+                    f"{raw_jsonl_path}"
+                )
+                continue
+            try:
+                load_result = review_to_silver_df(
+                    package_path, reviews_path, raw_jsonl_path
+                )
+            except (ValueError, TypeError) as exc:
+                base_failures.append(f"{package_path.name}: {exc}")
+            else:
+                base_results.append((seg, load_result))
+        if base_failures:
+            failures.extend(base_failures)  # don't write partial silver for this batch
+        else:
+            built[base] = base_results
+
+    # Phase 2: merge each complete base batch's segments into one silver parquet.
+    for base, seg_results in built.items():
+        merged = merge_silver_segments([(seg, lr.df) for seg, lr in seg_results])
+        rejected = sum(lr.rejected_events for _, lr in seg_results)
+        ignored = sum(lr.ignored_reviews for _, lr in seg_results)
+
+        out = config.lake_path / folder / f"{base}.parquet"
+        result.deltas.append(_compute_lake_delta(base, merged, out))
+        if not dry_run:
+            _atomic_write_parquet(merged, out)
+            result.row_count += merged.height
+            result.written_paths.append(out)
+
+        result.files.append(
+            FileStats(
+                name=f"{base} ({len(seg_results)} segment review(s))",
+                new_rows=merged.height,
+                updated_rows=0,
+                unchanged_rows=rejected,
+            )
+        )
+        if rejected:
+            result.notes.append(
+                f"{base}: excluded {rejected} rejected event(s) from silver"
+            )
+        if ignored:
+            result.notes.append(
+                f"{base}: ignored {ignored} review record(s) with no matching "
+                "package event"
+            )
+
+    # The complete batches above are already built; now fail (non-zero) naming
+    # each incomplete/invalid one, so an unfinished review blocks only itself.
+    if failures:
+        raise ValueError(
+            "Could not build silver for some review batch(es) — finish or remove "
+            "the incomplete/invalid review log(s):\n  " + "\n  ".join(failures)
+        )
+
     return result
 
 
@@ -491,6 +600,80 @@ def _ingest_cohorts(config: OncaiConfig, *, dry_run: bool = False) -> FolderResu
             result.row_count += len(new_df)
             result.written_paths.append(out)
 
+    return result
+
+
+# --- MANIFEST: runs ------------------------------------------------------
+
+
+def _runs_delta(df: pl.DataFrame, lake_path: Path) -> LakeDelta:
+    """Diff a runs DataFrame against the existing parquet, keyed by ``run_id``.
+
+    A run's manifest is rewritten started → completed, so a re-ingest after a
+    run finishes shows that ``run_id`` as ``updated`` rather than new.
+    """
+    existing = pl.read_parquet(lake_path) if lake_path.exists() else None
+    if existing is None or existing.is_empty():
+        return LakeDelta(
+            output_name="runs", new_rows=df.height, updated_rows=0, unchanged_rows=0
+        )
+    existing_by_id = {row["run_id"]: row for row in existing.iter_rows(named=True)}
+    new = updated = unchanged = 0
+    for row in df.iter_rows(named=True):
+        prev = existing_by_id.get(row["run_id"])
+        if prev is None:
+            new += 1
+        elif prev == row:
+            unchanged += 1
+        else:
+            updated += 1
+    return LakeDelta(
+        output_name="runs", new_rows=new, updated_rows=updated, unchanged_rows=unchanged
+    )
+
+
+def _ingest_runs(config: OncaiConfig, *, dry_run: bool = False) -> FolderResult:
+    """runs: union per-run JSON manifests into ``lake/runs/runs.parquet``.
+
+    Each ``inbox/runs/<run_id>.run.json`` is one row. The manifests are the
+    source of truth (written started → completed by ``oncai fc run-single``);
+    this projects them into a single queryable parquet keyed by ``run_id``,
+    which ``oncai build-db`` then loads into the DuckDB ``runs.runs`` table.
+    """
+    import json
+
+    from oncai.runs import RUN_FILE_SUFFIX, runs_to_dataframe
+
+    folder = "runs"
+    inbox_dir = config.inbox_path / folder
+    files = sorted(inbox_dir.glob(f"*{RUN_FILE_SUFFIX}"))
+    _ensure_sidecars(files)
+
+    result = FolderResult(folder=folder, mode=IngestMode.MANIFEST)
+
+    manifests: list[dict] = []
+    for f in files:
+        try:
+            manifests.append(json.loads(f.read_text()))
+        except (json.JSONDecodeError, OSError) as e:
+            result.notes.append(f"{f.name}: unreadable run manifest ({e})")
+
+    df = runs_to_dataframe(manifests)
+    out = config.lake_path / folder / f"{folder}.parquet"
+    delta = _runs_delta(df, out)
+    result.deltas.append(delta)
+    result.files.append(
+        FileStats(
+            name=f"{folder} ({len(files)} manifest(s))",
+            new_rows=delta.new_rows,
+            updated_rows=delta.updated_rows,
+            unchanged_rows=delta.unchanged_rows,
+        )
+    )
+    if not dry_run and df.height > 0:
+        _atomic_write_parquet(df, out)
+        result.row_count = df.height
+        result.written_paths.append(out)
     return result
 
 
@@ -610,7 +793,11 @@ def _dispatch(
         )
     if folder == "fc_extractions":
         return _ingest_fc_extractions(config, dry_run=dry_run)
+    if folder == "fc_reviews":
+        return _ingest_fc_reviews(config, dry_run=dry_run)
     if folder == "cohorts":
         return _ingest_cohorts(config, dry_run=dry_run)
+    if folder == "runs":
+        return _ingest_runs(config, dry_run=dry_run)
 
     raise RuntimeError(f"No ingest handler for folder: {folder}")

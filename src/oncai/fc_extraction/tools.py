@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -61,19 +61,14 @@ class ToolDefinition:
     model: type[BaseModel]
     handler: Callable[[dict], tuple[dict, BaseModel | None]] | None = None
     is_terminal: bool = False  # If True, this tool ends the note extraction
-    # Fields to include when formatting for the ledger/timeline prompt.
-    # Only used in multi-note workflows (batch.py) where previously-extracted
-    # events are summarised and injected as context for the next note.
-    # In single-note workflows (batch_single.py) there is no "next note", so
-    # ledger_fields are never read and have no effect.
-    # If None, all fields are included (minus 'comment' and 'note_id').
-    # If empty list, only shows count (no field details).
-    ledger_fields: list[str] | None = None
-    # Fields used to determine if two events are duplicates.
-    # If None, falls back to ledger_fields. If set, only these fields
-    # are compared for dedup (e.g., date + laterality for nephrectomy),
-    # while ledger_fields controls what's shown in the prompt.
-    dedup_fields: list[str] | None = None
+    event_identity_fields: tuple[str, ...] = field(default_factory=tuple)
+    # Fields that identify the same real-world event across separate runs.
+    # Used by review/disagreement tooling to align repeated calls of the same
+    # function before comparing their non-identity fields.
+    comparison_fields: tuple[str, ...] = field(default_factory=tuple)
+    # Fields that should be compared after events are aligned. Text fields are
+    # intentionally not special-cased; compare only fields explicitly listed
+    # here plus event_identity_fields.
 
 
 @dataclass
@@ -141,8 +136,8 @@ class ToolRegistry:
         model: type[BaseModel],
         handler: Callable[[dict], tuple[dict, BaseModel | None]] | None = None,
         is_terminal: bool = False,
-        ledger_fields: list[str] | None = None,
-        dedup_fields: list[str] | None = None,
+        event_identity_fields: Iterable[str] = (),
+        comparison_fields: Iterable[str] = (),
     ) -> None:
         """
         Register a tool.
@@ -153,23 +148,36 @@ class ToolRegistry:
             model: Pydantic model defining the tool's parameters
             handler: Optional handler function; if None, default validation handler is used
             is_terminal: If True, calling this tool ends extraction for current note
-            ledger_fields: Fields to include in ledger/timeline prompt (multi-note
-                          workflows only; ignored in single-note mode). If None,
-                          includes all fields (minus comment/note_id). If empty
-                          list [], only shows count.
-            dedup_fields: Fields used for dedup comparison. If None, falls back to
-                         ledger_fields. Use this when the identity of an event is a
-                         subset of what you want to display (e.g., date + laterality
-                         identifies a nephrectomy, but you also want grade in the ledger).
+            event_identity_fields: Fields that identify the same real-world
+                event across separate runs when this tool can be called more
+                than once for a note. For example, IHC results are identified by
+                specimen_id + standardized_test_name.
+            comparison_fields: Fields to compare after events are aligned.
+                Omit noisy/context fields like comment or free-text rationale.
         """
+        identity_fields = tuple(str(field_name) for field_name in event_identity_fields)
+        fields_to_compare = tuple(str(field_name) for field_name in comparison_fields)
+        model_fields = set(model.model_fields)
+        unknown_fields = [
+            field_name
+            for field_name in (*identity_fields, *fields_to_compare)
+            if field_name not in model_fields
+        ]
+        if unknown_fields:
+            missing = ", ".join(unknown_fields)
+            raise ValueError(
+                f"Tool {name!r} comparison metadata fields not found on "
+                f"{model.__name__}: {missing}"
+            )
+
         self._tools[name] = ToolDefinition(
             name=name,
             description=description,
             model=model,
             handler=handler,
             is_terminal=is_terminal,
-            ledger_fields=ledger_fields,
-            dedup_fields=dedup_fields,
+            event_identity_fields=identity_fields,
+            comparison_fields=fields_to_compare,
         )
 
     def get(self, name: str) -> ToolDefinition | None:
@@ -239,7 +247,7 @@ class ToolRegistry:
 
         # Validate with Pydantic
         try:
-            obj = tool_def.model(**arguments)
+            obj = tool_def.model.model_validate(arguments)
         except ValidationError as ve:
             return ToolResult(
                 success=False,
@@ -276,14 +284,18 @@ class ToolRegistry:
 
         # Default: return the validated object with a confirmation summary
         # so the model knows what was recorded and doesn't repeat the call.
-        event_dict = obj.model_dump()
-        # Build a short summary from ledger/dedup fields
-        summary_fields = (
-            tool_def.ledger_fields
-            if tool_def.ledger_fields
-            else [k for k in event_dict if k not in ("comment", "note_id")]
-        )
-        summary = {k: event_dict[k] for k in summary_fields if k in event_dict}
+        event_dict = obj.model_dump(mode="json")
+        summary_exclude = {"comment", "evidence", "note_id", "review_anchor"}
+        summary_fields = [
+            field_name
+            for field_name in event_dict
+            if field_name not in summary_exclude
+        ]
+        summary = {
+            field_name: event_dict[field_name]
+            for field_name in summary_fields
+            if field_name in event_dict
+        }
 
         is_plan = isinstance(obj, ExtractionPlan)
         kind = "Plan" if is_plan else "Event"
@@ -302,50 +314,6 @@ class ToolRegistry:
         """Check if a tool is terminal (ends note extraction)."""
         tool_def = self._tools.get(name)
         return tool_def.is_terminal if tool_def else False
-
-    def get_ledger_fields(self, name: str) -> list[str] | None:
-        """Get the ledger fields config for a tool."""
-        tool_def = self._tools.get(name)
-        return tool_def.ledger_fields if tool_def else None
-
-    def format_event_for_ledger(
-        self, name: str, event: BaseModel
-    ) -> dict[str, Any] | None:
-        """
-        Format an event for inclusion in the ledger/timeline prompt.
-
-        Only called in multi-note workflows (batch.py) where the timeline is
-        passed as context for subsequent notes.  Not used in single-note
-        workflows (batch_single.py).
-
-        Args:
-            name: Tool name
-            event: The event to format
-
-        Returns:
-            Dict with selected fields, or None if tool not found
-        """
-        tool_def = self._tools.get(name)
-        if tool_def is None:
-            return None
-
-        event_dict = event.model_dump()
-
-        # Always remove verbose fields
-        event_dict.pop("comment", None)
-        event_dict.pop("note_id", None)
-
-        # If ledger_fields is empty list, return empty dict (only count will be shown)
-        if tool_def.ledger_fields is not None and len(tool_def.ledger_fields) == 0:
-            return {}
-
-        # If ledger_fields is specified, filter to only those fields
-        if tool_def.ledger_fields is not None:
-            event_dict = {
-                k: v for k, v in event_dict.items() if k in tool_def.ledger_fields
-            }
-
-        return event_dict
 
 
 def create_registry_from_models(

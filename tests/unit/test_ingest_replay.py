@@ -153,12 +153,48 @@ class TestAlreadyCleanReports:
         assert {"key_hash", "content_hash"}.issubset(df.columns)
 
 
-class TestLakeOnlyFolders:
-    def test_lake_only_skipped(self, oncai_config):
-        inbox = oncai_config.inbox_path / "runs"
-        inbox.mkdir(parents=True, exist_ok=True)
-        # Drop something that would otherwise trigger ingest
-        (inbox / "anything.parquet").write_bytes(b"")
+class TestIngestRuns:
+    def test_manifests_union_into_one_parquet(self, oncai_config):
+        import json
 
+        runs_inbox = oncai_config.inbox_path / "runs"
+        runs_inbox.mkdir(parents=True, exist_ok=True)
+        (runs_inbox / "aaaa1111.run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "aaaa1111",
+                    "run_type": "fc_single",
+                    "name": "x",
+                    "batch_name": "v1",
+                    "status": "completed",
+                    "started_at": "2025-01-01",
+                    "items_succeeded": 5,
+                }
+            )
+        )
+        (runs_inbox / "bbbb2222.run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "bbbb2222",
+                    "run_type": "fc_single",
+                    "name": "y",
+                    "batch_name": "v2",
+                    "status": "started",
+                    "started_at": "2025-01-02",
+                }
+            )
+        )
+
+        results = run_ingest(oncai_config, folder="runs")
+        assert len(results) == 1
+
+        out = oncai_config.lake_path / "runs" / "runs.parquet"
+        assert out.exists()
+        df = pl.read_parquet(out)
+        assert df.height == 2
+        assert set(df["run_id"].to_list()) == {"aaaa1111", "bbbb2222"}
+
+    def test_empty_runs_inbox_skipped(self, oncai_config):
+        # An empty inbox/runs has nothing to project — dispatch returns None.
         results = run_ingest(oncai_config, folder="runs")
         assert results == []

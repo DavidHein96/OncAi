@@ -52,9 +52,11 @@ src/oncai/fc_extraction/
 │                     # vLLM Chat). This is the LLM cut-point.
 ├── batch_single.py   # run_fc_single_batch — per-note batch runner with
 │                     # resumable JSONL, hash-based skip, parallel workers
-├── load.py           # JSONL → wide parquet (events_json/finish_json/
-│                     # run_meta_json preserved verbatim as JSON strings)
-├── manifest.py       # git/version/hash helpers for run provenance
+├── load.py           # batch segments → wide parquet (highest segment per
+│                     # record_id wins; events_json/finish_json/run_meta_json
+│                     # preserved verbatim as JSON strings)
+├── manifest.py       # git/version/hash helpers + definition_hash
+│                     # (prompt + tool schemas) for change detection
 └── definitions/      # One file per workflow (example.py + path_kidney_*)
 ```
 
@@ -65,15 +67,22 @@ won't appear in `oncai fc list`.
 
 ## Supporting plumbing (skim)
 
-- **Lake**: `lake.py` + `ingest.py` + `transforms/collate.py` mirror remote
-  parquets and replay inbox CSVs into versioned lake parquets. Each row gets
-  Blake2b `key_hash` / `content_hash` for incremental dedup.
+- **Lake**: `ingest.py` + `transforms/collate.py` replay inbox files into
+  versioned lake parquets (each row gets Blake2b `key_hash` / `content_hash`
+  for incremental dedup). `lake.py` syncs the **inbox only** between local and
+  remote (`pull_inbox_from_remote` / `push_inbox_to_remote`) — the lake is a
+  disposable projection rebuilt from the inbox, never transferred.
 - **DuckDB**: `db.py` rebuilds a queryable database from the lake. Schemas:
   `raw` (pathology), `cohort`, `extractions_raw` (one table per FC batch),
-  `extractions_transformed` (user `.sql` sidecars), `extractions_staging`
-  (`oncai fc stage`), `runs` (run log).
-- **Run log**: every `fc run-single` invocation writes a row to
-  `lake/runs/runs.parquet` via `runs.py` for hyperparameter tracking.
+  `extractions_silver` (one table per reviewed batch from `fc_reviews` — the
+  adjudicated, event-grain output), `extractions_gold` (dense per-concept tables
+  a review batch's `<batch>.sql` sidecar reshapes from its silver table),
+  `extractions_transformed` (user `.sql` sidecars), `scratch`
+  (`oncai fc peek`), `runs` (run log).
+- **Run log**: every `fc run-single` invocation writes an immutable manifest to
+  `inbox/runs/<run_id>.run.json` via `runs.py` (`start_run` → `complete_run`,
+  started → completed in place). `ingest runs` projects the manifests into
+  `lake/runs/runs.parquet`; `runs list/show/compare` read the manifests direct.
 
 ## Conventions you MUST follow
 

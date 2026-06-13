@@ -15,12 +15,12 @@ Used with batch_single.py for single-note processing.
 from __future__ import annotations
 
 import logging
-import re
 from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BeforeValidator, Field
 
+from ..enum_helpers import build_enum_lookup, normalize_against
 from ..models import ExtractionEvent, ExtractionPlan
 from ..tools import ToolRegistry
 
@@ -109,7 +109,7 @@ class HistologicFeatureStatus(StrEnum):
 class HistologicType(StrEnum):
     CLEAR_CELL_RCC = "Clear cell renal cell carcinoma"
     MULTILOCULAR_CYSTIC = (
-        "Multilocular cystic clear cell renal cell neoplasm of low malignant potential"
+        "Multilocular cystic renal neoplasm of low malignant potential"
     )
     PAPILLARY_RCC = "Papillary renal cell carcinoma"
     CHROMOPHOBE_RCC = "Chromophobe renal cell carcinoma"
@@ -127,7 +127,7 @@ class HistologicType(StrEnum):
     TUBULOCYSTIC = "Tubulocystic renal cell carcinoma"
     ACD_ASSOCIATED = "Acquired cystic disease-associated renal cell carcinoma"
     CLEAR_CELL_PAPILLARY = "Clear cell papillary renal cell tumor"
-    SDH_DEFICIENT = "Succinate dehydrogenase-deficient (SDH) renal carcinoma"
+    SDH_DEFICIENT = "Succinate dehydrogenase-deficient (SDH) renal cell carcinoma"
     FH_DEFICIENT = "Fumarate hydratase-deficient renal cell carcinoma"
     ALK_REARRANGED = "ALK-rearranged renal cell carcinoma"
     SUBTYPE_PENDING = "Renal cell carcinoma, subtype pending additional studies"
@@ -195,101 +195,81 @@ class PathMStage(StrEnum):
     PM0 = "pM0"  # No distant metastasis
 
 
-# =============================================================================
-# Normalization helpers
-# =============================================================================
-
-
-def _normalize_key(s: str) -> str:
-    """Reduce a string to a canonical comparison key by lowercasing and
-    stripping whitespace, hyphens, underscores, slashes, dots, and parens."""
-    return re.sub(r"[\s\-_./()]+", "", s).lower()
-
-
-def _build_enum_lookup(enum_cls: type[StrEnum]) -> dict[str, str]:
-    """Build a {normalized_key: enum_value} mapping for an entire Enum."""
-    return {_normalize_key(m.value): m.value for m in enum_cls}
-
-
-def _normalize_against(v: object, lookup: dict[str, str], field_name: str) -> str:
-    """Match a value against a normalized lookup; log when a correction is made."""
-    if isinstance(v, StrEnum):
-        return v.value
-    s = str(v).strip()
-    match = lookup.get(_normalize_key(s))
-    if match is not None and match != s:
-        logger.debug("normalizer fixed %s: %r -> %r", field_name, s, match)
-    return match if match is not None else s
-
-
-_NEPHRECTOMY_TYPE_LOOKUP = _build_enum_lookup(NephrectomyType)
-_LATERALITY_LOOKUP = _build_enum_lookup(Laterality)
-_FOCALITY_LOOKUP = _build_enum_lookup(Focality)
-_MARGIN_STATUS_LOOKUP = _build_enum_lookup(MarginStatus)
-_TUMOR_SITE_LOOKUP = _build_enum_lookup(TumorSite)
-_TUMOR_IDENTIFIER_LOOKUP = _build_enum_lookup(TumorIdentifier)
-_GRADE_LOOKUP = _build_enum_lookup(Grade)
-_FEATURE_STATUS_LOOKUP = _build_enum_lookup(HistologicFeatureStatus)
-_HISTOLOGIC_TYPE_LOOKUP = _build_enum_lookup(HistologicType)
-_TUMOR_EXTENT_LOOKUP = _build_enum_lookup(TumorExtent)
-_PATH_T_STAGE_LOOKUP = _build_enum_lookup(PathTStage)
-_PATH_N_STAGE_LOOKUP = _build_enum_lookup(PathNStage)
-_PATH_M_STAGE_LOOKUP = _build_enum_lookup(PathMStage)
+_NEPHRECTOMY_TYPE_LOOKUP = build_enum_lookup(NephrectomyType)
+_LATERALITY_LOOKUP = build_enum_lookup(Laterality)
+_FOCALITY_LOOKUP = build_enum_lookup(Focality)
+_MARGIN_STATUS_LOOKUP = build_enum_lookup(MarginStatus)
+_TUMOR_SITE_LOOKUP = build_enum_lookup(TumorSite)
+_TUMOR_IDENTIFIER_LOOKUP = build_enum_lookup(TumorIdentifier)
+_GRADE_LOOKUP = build_enum_lookup(Grade)
+_FEATURE_STATUS_LOOKUP = build_enum_lookup(HistologicFeatureStatus)
+_HISTOLOGIC_TYPE_LOOKUP = build_enum_lookup(HistologicType)
+_TUMOR_EXTENT_LOOKUP = build_enum_lookup(TumorExtent)
+_PATH_T_STAGE_LOOKUP = build_enum_lookup(PathTStage)
+_PATH_N_STAGE_LOOKUP = build_enum_lookup(PathNStage)
+_PATH_M_STAGE_LOOKUP = build_enum_lookup(PathMStage)
 
 
 def normalize_nephrectomy_type(v: object) -> str:
-    return _normalize_against(v, _NEPHRECTOMY_TYPE_LOOKUP, "nephrectomy_type")
+    return normalize_against(
+        v, _NEPHRECTOMY_TYPE_LOOKUP, "nephrectomy_type", logger=logger
+    )
 
 
 def normalize_laterality(v: object) -> str:
-    return _normalize_against(v, _LATERALITY_LOOKUP, "laterality")
+    return normalize_against(v, _LATERALITY_LOOKUP, "laterality", logger=logger)
 
 
 def normalize_focality(v: object) -> str:
-    return _normalize_against(v, _FOCALITY_LOOKUP, "focality")
+    return normalize_against(v, _FOCALITY_LOOKUP, "focality", logger=logger)
 
 
 def normalize_margin_status(v: object) -> str:
-    return _normalize_against(v, _MARGIN_STATUS_LOOKUP, "margin_status")
+    return normalize_against(v, _MARGIN_STATUS_LOOKUP, "margin_status", logger=logger)
 
 
 def normalize_tumor_site(v: object) -> str:
-    return _normalize_against(v, _TUMOR_SITE_LOOKUP, "tumor_site")
+    return normalize_against(v, _TUMOR_SITE_LOOKUP, "tumor_site", logger=logger)
 
 
 def normalize_tumor_identifier(v: object) -> str:
-    return _normalize_against(v, _TUMOR_IDENTIFIER_LOOKUP, "tumor_identifier")
+    return normalize_against(
+        v, _TUMOR_IDENTIFIER_LOOKUP, "tumor_identifier", logger=logger
+    )
 
 
 def normalize_grade(v: object) -> str:
-    return _normalize_against(v, _GRADE_LOOKUP, "grade")
+    return normalize_against(v, _GRADE_LOOKUP, "grade", logger=logger)
 
 
 def normalize_feature_status(v: object) -> str:
-    return _normalize_against(v, _FEATURE_STATUS_LOOKUP, "feature_status")
+    return normalize_against(v, _FEATURE_STATUS_LOOKUP, "feature_status", logger=logger)
 
 
 def normalize_histologic_type(v: object) -> str:
-    return _normalize_against(v, _HISTOLOGIC_TYPE_LOOKUP, "histologic_type")
+    return normalize_against(
+        v, _HISTOLOGIC_TYPE_LOOKUP, "histologic_type", logger=logger
+    )
 
 
 def normalize_path_t_stage(v: object) -> str:
-    return _normalize_against(v, _PATH_T_STAGE_LOOKUP, "path_t_stage")
+    return normalize_against(v, _PATH_T_STAGE_LOOKUP, "path_t_stage", logger=logger)
 
 
 def normalize_path_n_stage(v: object) -> str:
-    return _normalize_against(v, _PATH_N_STAGE_LOOKUP, "path_n_stage")
+    return normalize_against(v, _PATH_N_STAGE_LOOKUP, "path_n_stage", logger=logger)
 
 
 def normalize_path_m_stage(v: object) -> str:
-    return _normalize_against(v, _PATH_M_STAGE_LOOKUP, "path_m_stage")
+    return normalize_against(v, _PATH_M_STAGE_LOOKUP, "path_m_stage", logger=logger)
 
 
 def normalize_tumor_extent_list(v: object) -> list[str]:
     if not isinstance(v, list):
         return v  # type: ignore[return-value]  # let pydantic raise the type error
     return [
-        _normalize_against(item, _TUMOR_EXTENT_LOOKUP, "tumor_extent") for item in v
+        normalize_against(item, _TUMOR_EXTENT_LOOKUP, "tumor_extent", logger=logger)
+        for item in v
     ]
 
 
@@ -411,11 +391,7 @@ class RecordKidneyTumor(ExtractionEvent):
             "WHO/ISUP nucleolar grade is validated only for clear cell and "
             "papillary RCC. Use 'grade 1'-'grade 4' when a numeric grade is "
             "reported. Use 'high grade' or 'low grade' only when the report uses "
-            "those terms without a numeric grade. Use 'not applicable' for "
-            "subtypes not graded by this system: chromophobe RCC, oncocytoma, "
-            "angiomyolipoma, MTSCC, and other non-clear-cell / non-papillary "
-            "subtypes. Use 'cannot be assessed' only when the report explicitly "
-            "states grade cannot be assessed."
+            "those terms without a numeric grade. Use 'cannot be assessed' only when the report explicitly states grade cannot be assessed."
         ),
     )
     tumor_size_cm: float | None = Field(
@@ -534,9 +510,16 @@ class RecordNephrectomyStaging(ExtractionEvent):
     )
 
 
-class FlagReportForReview(ExtractionPlan):
+class FlagReportForReview(ExtractionEvent):
     """Flag the report for human review. Use sparingly."""
 
+    comment: str = Field(
+        "",
+        description=(
+            "Optional extra context for the review flag. Put the specific "
+            "reason in reason and exact source-note snippets in review_anchor."
+        ),
+    )
     reason: str = Field(
         ...,
         description=(
@@ -545,6 +528,15 @@ class FlagReportForReview(ExtractionPlan):
             "'conflicting information between original diagnosis and addendum', "
             "'wording does not match any available enum value'. Routine "
             "'not specified' cases do NOT warrant a flag."
+        ),
+    )
+    review_anchor: list[str] = Field(
+        ...,
+        description=(
+            "Exact text snippets from the report that should be highlighted "
+            "and used as jump targets in the review app. Each item should be "
+            "an exact substring containing the ambiguity. If several sections "
+            "are relevant, include multiple anchors."
         ),
     )
 
@@ -607,6 +599,11 @@ or total nephrectomy).
   NOT strong enough — fall back to a less-specific enum (e.g., POORLY_DIFFERENTIATED,
   UNCLASSIFIED_RCC) or call `flag_report_for_review`.
 
+## NEPHRECTOMY TYPE GUIDANCE
+- Radical is the entire kidney plus variable lengths of ureter, perirenal fat to the Gerota's facia, and variable lengths of major renal vessels.
+- Total nephrectomy is similar but performed for presumption of benign disease and may not extend to the Gerotas fascia.
+- Partial nephrectomy: Surgical removal of a kidney tumor with a variable margin of surrounding kidney tissue, often including nearby fat and occasionally part of the collecting system, while preserving the rest of the kidney.
+
 ## AJCC 8th TNM (PRIMARY KIDNEY)
  - "pT": pT not assigned (cannot be determined based on available pathological information)
  - "pT0": no evidence of primary tumor
@@ -625,6 +622,14 @@ or total nephrectomy).
 ADRENAL RULE:
 - Direct contiguous adrenal invasion from the kidney tumor → pT4.
 - Non-contiguous adrenal involvement (separate deposit) → pM1, NOT pT4.
+
+GRADE:
+- G1 -> nucleoli absent or inconspicuous at 400x magnification
+- G2 -> nucleoli conspicuous and visible at 400x magnification, not prominent at 100x magnification
+- G3 -> nucleoli conspicuous at 100x magnification
+- G4 -> extreme nuclear pleomorphism and/or multinucleated giant cells and/or rhabdoid and/or sarcomatoid differentiation
+If the report just says high grade or low grade without a numeric grade, use the corresponding high_grade or low_grade enum value.
+The 1-4 grading is typically used for clear cell and papillary RCC, so other subtypes will be more likely to use high_grade / low_grade or not_applicable.
 
 LYMPHOVASCULAR vs RENAL VEIN:
 - Renal vein, segmental renal vein branch, and IVC involvement are TUMOR EXTENT
@@ -666,6 +671,13 @@ LYMPHOVASCULAR vs RENAL VEIN:
 - "Renal medullary carcinoma" / RMC (classically in patients with sickle cell
   trait or disease; loss of SMARCB1 / INI-1 by IHC) → SMARCB1-deficient renal
   medullary carcinoma
+- "Clear cell papillary renal cell carcinoma" / "clear cell papillary RCC" /
+  "clear cell tubulopapillary RCC" → Clear cell papillary renal cell tumor
+  (WHO 2022 reclassified this indolent entity from a carcinoma to a "tumor";
+  the older "carcinoma" wording in a report maps to the same value).
+- "Papillary RCC, type 1" / "type 2" / "type 1 and 2" → Papillary renal cell
+  carcinoma (WHO 2022 no longer subdivides papillary RCC into types 1 and 2;
+  drop the type designation and assign the single Papillary renal cell carcinoma value).
 - 'Renal cell carcinoma, NOS (unclassified)' ->  used when classification to a subtype is difficult due to complex or borderline histological features
 - 'Renal cell carcinoma, no subtype specified' -> used when the pathologist simply does not provide a subtype and only refers to the histology as renal cell carcinoma.
 
@@ -685,12 +697,18 @@ LYMPHOVASCULAR vs RENAL VEIN:
 - "Directly invades adrenal gland" → direct adrenal invasion; usually pT4.
 - "Extends beyond Gerota's fascia" → beyond Gerota's fascia; usually pT4.
 
+## PROVENANCE
+- Use `evidence` for exact source-note snippets supporting the extraction.
+- Use `review_anchor` only for report-level snippets explaining a human review flag.
+
 ## FLAGGING
 Use `flag_report_for_review` for:
 - No primary nephrectomy specimen present (and STOP after flagging).
 - Two distinct nephrectomy specimens in one report.
 - Genuinely conflicting information that the available enums cannot resolve.
 - Atypical wording where no listed enum value fits.
+When flagging, populate review_anchor with exact report text snippets
+the review app can highlight and jump to.
 Routine "not specified" cases do NOT warrant a flag.
 """
 
@@ -730,6 +748,12 @@ def create_path_kidney_nephrectomy_registry() -> ToolRegistry:
             "apply to the whole specimen, not per tumor."
         ),
         model=RecordNephrectomySpecimen,
+        comparison_fields=(
+            "nephrectomy_type",
+            "laterality",
+            "focality",
+            "margin_status",
+        ),
     )
 
     registry.register(
@@ -743,6 +767,18 @@ def create_path_kidney_nephrectomy_registry() -> ToolRegistry:
             "this same tool."
         ),
         model=RecordKidneyTumor,
+        event_identity_fields=("tumor_identifier",),
+        comparison_fields=(
+            "tumor_site",
+            "histologic_type",
+            "tumor_grade",
+            "tumor_size_cm",
+            "sarcomatoid_features",
+            "rhabdoid_features",
+            "tumor_necrosis",
+            "lymphovascular_invasion",
+            "tumor_extent",
+        ),
     )
 
     registry.register(
@@ -755,6 +791,12 @@ def create_path_kidney_nephrectomy_registry() -> ToolRegistry:
             "submitted/identified."
         ),
         model=RecordNephrectomyStaging,
+        comparison_fields=(
+            "path_t_stage",
+            "t_note_multiple",
+            "path_n_stage",
+            "path_m_stage",
+        ),
     )
 
     registry.register(
