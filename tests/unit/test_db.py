@@ -5,7 +5,7 @@ from __future__ import annotations
 import polars as pl
 
 from oncai.config import OncaiConfig
-from oncai.db import build_database, get_database_info
+from oncai.db import build_database, get_database_info, update_database_folder
 
 
 class TestBuildDatabase:
@@ -72,6 +72,55 @@ class TestBuildDatabase:
         results = build_database(config)
 
         assert results["extractions_silver.demo"] == 1
+
+    def test_build_database_drops_stale_owned_tables(self, tmp_path):
+        lake = tmp_path / "lake"
+        reviews = lake / "fc_reviews"
+        reviews.mkdir(parents=True)
+        pl.DataFrame({"event_key": ["A"]}).write_parquet(reviews / "demo.parquet")
+
+        config = OncaiConfig(
+            remote_path=tmp_path / "remote",
+            lake_path=lake,
+            inbox_path=tmp_path / "inbox",
+            db_path=tmp_path / "test.duckdb",
+        )
+        build_database(config)
+        assert "extractions_silver.demo" in get_database_info(config)
+
+        (reviews / "demo.parquet").unlink()
+        build_database(config)
+
+        assert "extractions_silver.demo" not in get_database_info(config)
+
+    def test_update_database_folder_drops_missing_multi_table_parquet(self, tmp_path):
+        lake = tmp_path / "lake"
+        raw = lake / "fc_extractions"
+        raw.mkdir(parents=True)
+        pl.DataFrame({"record_id": ["A"]}).write_parquet(raw / "a.parquet")
+        pl.DataFrame({"record_id": ["B"]}).write_parquet(raw / "b.parquet")
+
+        config = OncaiConfig(
+            remote_path=tmp_path / "remote",
+            lake_path=lake,
+            inbox_path=tmp_path / "inbox",
+            db_path=tmp_path / "test.duckdb",
+        )
+        build_database(config)
+        assert {"extractions_raw.a", "extractions_raw.b"}.issubset(
+            get_database_info(config)
+        )
+
+        (raw / "b.parquet").unlink()
+        result = update_database_folder(config, "fc_extractions")
+
+        info = get_database_info(config)
+        assert "extractions_raw.a" in info
+        assert "extractions_raw.b" not in info
+        # The dropped table is reported as a removal, not a zero-row update.
+        assert result.dropped == ["extractions_raw.b"]
+        assert "extractions_raw.b" not in result.updated
+        assert result.updated["extractions_raw.a"] == 1
 
 
 class TestGetDatabaseInfo:

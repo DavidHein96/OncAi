@@ -440,6 +440,44 @@ def test_ingest_fc_reviews_ignores_flat_layout(oncai_config) -> None:
     assert not (oncai_config.lake_path / "fc_reviews" / "demo.parquet").exists()
 
 
+def test_ingest_fc_reviews_skips_and_prunes_tombstoned_batch(oncai_config) -> None:
+    from oncai.tombstones import TombstoneAction, write_tombstone_event
+
+    batch_dir = _review_dir(oncai_config, "demo.001")
+    (batch_dir / f"demo.001{REVIEW_PACKAGE_SUFFIX}").write_text(
+        json.dumps(_review_package(batch="demo.001"))
+    )
+    (batch_dir / f"demo.001{REVIEW_LOG_SUFFIX}").write_text(
+        "\n".join(json.dumps(r) for r in _reviews()) + "\n"
+    )
+    raw_path = oncai_config.inbox_path / "fc_extractions" / "demo" / "001.jsonl"
+    _write_raw_jsonl(
+        raw_path,
+        [_raw_record("N1", "clear cell renal cell carcinoma", second_diagnosis="onc")],
+    )
+
+    run_ingest(oncai_config, folder="fc_reviews")
+    out = oncai_config.lake_path / "fc_reviews" / "demo.parquet"
+    assert out.exists()
+
+    # Forget by the base batch name (the fc_reviews/<batch>/ folder name).
+    write_tombstone_event(
+        oncai_config,
+        kind="fc_reviews",
+        target="demo",
+        action=TombstoneAction.FORGET,
+        actor="test",
+        at="2026-06-12T12:00:00Z",
+        event_id="aaaaaaaaaaaaaaaa",
+    )
+    results = run_ingest(oncai_config, folder="fc_reviews")
+
+    assert not out.exists()
+    notes = " ".join(results[0].notes)
+    assert "demo: skipped because tombstoned" in notes
+    assert "demo: pruned lake projection — tombstoned" in notes
+
+
 def test_event_key_round_trips_to_gold(tmp_path: Path) -> None:
     from oncai.review.package import build_review_package
 

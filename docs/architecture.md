@@ -36,6 +36,7 @@ Inbox CSVs are replayed into a versioned parquet lake. Each folder has a fixed i
 | STATIC | `fc_reviews` | Per-segment `<batch>/<batch>.NNN.review_pkg.json` + `.reviews.jsonl` pairs merge (highest segment per note) into one `extractions_silver.<batch>` parquet. Optional `<batch>/<batch>.sql` sidecars reshape silver into `extractions_gold`. |
 | NAMED | `cohorts` | Filename = identity; one parquet per CSV. |
 | MANIFEST | `runs` | Each `fc run-single` writes an immutable `inbox/runs/<run_id>.run.json` (started → completed in place); ingest unions the manifests into `lake/runs/runs.parquet`. |
+| MANIFEST | `tombstones` | Each `oncai forget` / `oncai revive` appends an immutable tombstone event; ingest projects the audit log and honors active forgets for supported folders. |
 
 Per-folder transforms live in `transforms/`:
 - **Pathology collation** (`transforms/collate.py`) — multi-line CSV reports are reassembled into one row per `report_id`, then generic text cleaning is applied (Unicode normalization, whitespace and line-ending standardization). Two cleaning steps are opt-in and off by default, since they encode source-specific assumptions: site-specific boilerplate stripping (`PATHOLOGY_BOILERPLATE_PATTERNS`, ships empty) and decoding double-spaces back into line breaks (`DECODE_DOUBLE_SPACE_LINEBREAKS`). Reports that are already one-row-per-report (a `report_text` column and no `mult_ln_val_storage`) are auto-detected and passed through untouched — hashes only, no collation or cleaning. Each row gets `key_hash` (Blake2b of identity cols) and `content_hash` (Blake2b of content cols) so subsequent re-ingests are incremental.
@@ -80,6 +81,7 @@ The DuckDB is rebuilt from the lake on demand. Schemas:
 | `extractions_transformed` | `fc_extractions/<batch>/<batch>.sql` sidecars | User-declared derived tables (typed events from `events_json`, etc.) |
 | `scratch` | `oncai fc peek` | Throwaway per-event layout for a quick look (cleared on rebuild) |
 | `runs` | `runs` | Run-log history (one row per `fc run-single` invocation) |
+| `meta` | `tombstones` | Tombstone audit log (`meta.tombstones`) |
 
 The wide layout in `extractions_raw.<batch>` keeps `events_json`, `finish_json`, `run_meta_json` as JSON strings — schema doesn't evolve with new event types. Relational reshaping into typed tables happens at `build-db` time via batch-local transform sidecars.
 

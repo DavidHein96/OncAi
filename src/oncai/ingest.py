@@ -33,6 +33,14 @@ from oncai.config import (
 from oncai.lake import merge_dataframes
 from oncai.schemas.pathology import PATHOLOGY_SCHEMA
 from oncai.sidecar import ensure_sidecar
+from oncai.tombstones import (
+    SUPPORTED_TOMBSTONE_KINDS,
+    ResolvedTombstones,
+    inbox_targets_for_kind,
+    lake_targets_for_kind,
+    prune_lake_target,
+    resolve_tombstones,
+)
 from oncai.transforms import collate_pathology, passthrough_transform
 
 _BATCH_LOCAL_SQL_FOLDERS = {"fc_extractions", "fc_reviews"}
@@ -311,7 +319,10 @@ def _transform_pathology(path: Path) -> tuple[pl.DataFrame, list[str]]:
 
 
 def _ingest_fc_extractions(
-    config: OncaiConfig, *, dry_run: bool = False
+    config: OncaiConfig,
+    *,
+    dry_run: bool = False,
+    forgotten_targets: set[str] | None = None,
 ) -> FolderResult:
     """fc_extractions: each batch is a folder of numbered segments.
 
@@ -329,6 +340,7 @@ def _ingest_fc_extractions(
     from oncai.fc_extraction.load import merge_segments_to_parquet, segment_files
 
     folder = "fc_extractions"
+    forgotten = forgotten_targets or set()
     inbox_dir = config.inbox_path / folder
     result = FolderResult(folder=folder, mode=IngestMode.STATIC)
     if not inbox_dir.exists():
@@ -336,6 +348,9 @@ def _ingest_fc_extractions(
 
     for batch_dir in sorted(p for p in inbox_dir.iterdir() if p.is_dir()):
         batch_name = batch_dir.name
+        if batch_name in forgotten:
+            result.notes.append(f"{batch_name}: skipped because tombstoned")
+            continue
         segments = segment_files(batch_dir)
         if not segments:
             continue
@@ -378,7 +393,12 @@ def _ingest_fc_extractions(
 # --- STATIC: fc_reviews -------------------------------------------------
 
 
-def _ingest_fc_reviews(config: OncaiConfig, *, dry_run: bool = False) -> FolderResult:
+def _ingest_fc_reviews(
+    config: OncaiConfig,
+    *,
+    dry_run: bool = False,
+    forgotten_targets: set[str] | None = None,
+) -> FolderResult:
     """fc_reviews: pair per-segment review packages with raw segments and logs.
 
     Drop ``<batch>.NNN.review_pkg.json`` + ``<batch>.NNN.reviews.jsonl`` into
@@ -404,6 +424,7 @@ def _ingest_fc_reviews(config: OncaiConfig, *, dry_run: bool = False) -> FolderR
     )
 
     folder = "fc_reviews"
+    forgotten = forgotten_targets or set()
     inbox_dir = config.inbox_path / folder
     result = FolderResult(folder=folder, mode=IngestMode.STATIC)
     # One canonical layout: every pair lives in a batch-named folder,
@@ -411,6 +432,11 @@ def _ingest_fc_reviews(config: OncaiConfig, *, dry_run: bool = False) -> FolderR
     # hook). Glob exactly one level deep — files dropped flat are not picked up.
     package_files = sorted(inbox_dir.glob(f"*/*{REVIEW_PACKAGE_SUFFIX}"))
     review_files = sorted(inbox_dir.glob(f"*/*{REVIEW_LOG_SUFFIX}"))
+    skipped = sorted({p.parent.name for p in package_files + review_files} & forgotten)
+    for base in skipped:
+        result.notes.append(f"{base}: skipped because tombstoned")
+    package_files = [p for p in package_files if p.parent.name not in forgotten]
+    review_files = [p for p in review_files if p.parent.name not in forgotten]
     _ensure_sidecars(package_files + review_files)
 
     packages = {review_batch_name(p): p for p in package_files}
@@ -531,7 +557,12 @@ def _ingest_fc_reviews(config: OncaiConfig, *, dry_run: bool = False) -> FolderR
 # --- NAMED: cohorts -----------------------------------------------------
 
 
-def _ingest_cohorts(config: OncaiConfig, *, dry_run: bool = False) -> FolderResult:
+def _ingest_cohorts(
+    config: OncaiConfig,
+    *,
+    dry_run: bool = False,
+    forgotten_targets: set[str] | None = None,
+) -> FolderResult:
     """cohorts: each CSV is a separate cohort, filename = cohort name.
 
     Key column auto-detected from the first match of ``COHORT_KEY_PRIORITY``
@@ -552,6 +583,7 @@ def _ingest_cohorts(config: OncaiConfig, *, dry_run: bool = False) -> FolderResu
     )
 
     folder = "cohorts"
+    forgotten = forgotten_targets or set()
     inbox_dir = config.inbox_path / folder
     files = sorted(
         _collect_inbox_files(inbox_dir, extensions=(".csv",)), key=lambda p: p.name
@@ -561,6 +593,9 @@ def _ingest_cohorts(config: OncaiConfig, *, dry_run: bool = False) -> FolderResu
     result = FolderResult(folder=folder, mode=IngestMode.NAMED)
     cohorts_dir = _cohorts_dir(config.lake_path)
     for f in files:
+        if f.stem in forgotten:
+            result.notes.append(f"{f.stem}: skipped because tombstoned")
+            continue
         try:
             new_df, key_column = prepare_cohort_df(f)
         except ValueError as e:
@@ -679,6 +714,54 @@ def _ingest_runs(config: OncaiConfig, *, dry_run: bool = False) -> FolderResult:
     return result
 
 
+# --- MANIFEST: tombstones ------------------------------------------------
+
+
+def _ingest_tombstones(
+    config: OncaiConfig,
+    tombstones: ResolvedTombstones,
+    *,
+    dry_run: bool = False,
+) -> FolderResult:
+    """Project tombstone events into ``lake/tombstones/tombstones.parquet``."""
+    folder = "tombstones"
+    result = FolderResult(folder=folder, mode=IngestMode.MANIFEST)
+    result.notes.extend(tombstones.errors)
+
+    rows = [
+        {
+            "event_id": event.event_id,
+            "kind": event.kind,
+            "target": event.target,
+            "action": event.action.value,
+            "reason": event.reason,
+            "actor": event.actor,
+            "at": event.at,
+            "active": tombstones.is_active_event(event),
+        }
+        for event in tombstones.events
+    ]
+    if not rows:
+        return result
+
+    df = pl.DataFrame(rows)
+    out = config.lake_path / folder / f"{folder}.parquet"
+    result.deltas.append(_compute_lake_delta(folder, df, out))
+    result.files.append(
+        FileStats(
+            name=f"{folder} ({len(rows)} event(s))",
+            new_rows=len(rows),
+            updated_rows=0,
+            unchanged_rows=0,
+        )
+    )
+    if not dry_run:
+        _atomic_write_parquet(df, out)
+        result.row_count = df.height
+        result.written_paths.append(out)
+    return result
+
+
 # --- top-level dispatch -------------------------------------------------
 
 
@@ -699,15 +782,36 @@ def run_ingest(
     else:
         targets = list(FOLDER_MODES.keys())
 
+    tombstones = resolve_tombstones(config)
     results: list[FolderResult] = []
     for f in targets:
         mode = FOLDER_MODES[f]
         if mode == IngestMode.LAKE_ONLY:
             continue
-        result = _dispatch(f, config, dry_run=dry_run)
+        forgotten_targets = tombstones.active_targets(f)
+        result = _dispatch(
+            f,
+            config,
+            dry_run=dry_run,
+            forgotten_targets=forgotten_targets,
+            tombstones=tombstones,
+        )
         if result is not None:
             results.append(result)
-            _mirror_sql_files(f, config, result, dry_run=dry_run)
+            _mirror_sql_files(
+                f,
+                config,
+                result,
+                dry_run=dry_run,
+                forgotten_targets=forgotten_targets,
+            )
+            _reconcile_lake_projection(
+                f,
+                config,
+                result,
+                dry_run=dry_run,
+                forgotten_targets=forgotten_targets,
+            )
     return results
 
 
@@ -746,6 +850,7 @@ def _mirror_sql_files(
     result: FolderResult,
     *,
     dry_run: bool,
+    forgotten_targets: set[str] | None = None,
 ) -> None:
     """Copy transform SQL sidecars from inbox into the lake.
 
@@ -765,6 +870,7 @@ def _mirror_sql_files(
     if not inbox_dir.exists():
         return
     lake_dir = config.lake_path / folder
+    forgotten = forgotten_targets or set()
 
     sql_pairs: list[tuple[Path, Path, str]] = []
     if folder in _BATCH_LOCAL_SQL_FOLDERS:
@@ -776,6 +882,8 @@ def _mirror_sql_files(
         for src in sorted(inbox_dir.glob("*/*.sql")):
             batch = src.parent.name
             rel_name = f"{batch}/{src.name}"
+            if batch in forgotten:
+                continue
             if src.stem != batch:
                 result.notes.append(
                     f"{rel_name}: SQL filename must match parent batch folder "
@@ -785,7 +893,9 @@ def _mirror_sql_files(
             sql_pairs.append((src, lake_dir / f"{batch}.sql", rel_name))
     else:
         sql_pairs = [
-            (src, lake_dir / src.name, src.name) for src in sorted(inbox_dir.glob("*.sql"))
+            (src, lake_dir / src.name, src.name)
+            for src in sorted(inbox_dir.glob("*.sql"))
+            if src.stem not in forgotten
         ]
 
     if not sql_pairs:
@@ -808,12 +918,57 @@ def _mirror_sql_files(
             )
 
 
+def _reconcile_lake_projection(
+    folder: str,
+    config: OncaiConfig,
+    result: FolderResult,
+    *,
+    dry_run: bool,
+    forgotten_targets: set[str],
+) -> None:
+    """Prune stale lake files for supported tombstone folders."""
+    if folder not in SUPPORTED_TOMBSTONE_KINDS:
+        return
+
+    retained_targets = inbox_targets_for_kind(config, folder) - forgotten_targets
+    stale_targets = (lake_targets_for_kind(config, folder) - retained_targets) | set(
+        forgotten_targets
+    )
+    for target in sorted(stale_targets):
+        pruned = prune_lake_target(config, folder, target, dry_run=dry_run)
+        if not pruned:
+            continue
+        verb = "would prune" if dry_run else "pruned"
+        names = ", ".join(path.name for path in pruned)
+        if target in forgotten_targets:
+            # Deliberate: a tombstone forgot this source.
+            result.notes.append(f"{target}: {verb} lake projection — tombstoned ({names})")
+        else:
+            # No tombstone — the inbox source simply vanished. Could be an
+            # intentional local cleanup, but also an accidental delete, so say
+            # so loudly: this prune does NOT propagate (no tombstone to sync).
+            result.notes.append(
+                f"{target}: {verb} ORPHAN lake projection — inbox source missing "
+                f"with no tombstone ({names}); restore the source, or run "
+                f"'oncai forget {folder} {target}' to forget it everywhere"
+            )
+
+
 def _dispatch(
-    folder: str, config: OncaiConfig, *, dry_run: bool
+    folder: str,
+    config: OncaiConfig,
+    *,
+    dry_run: bool,
+    forgotten_targets: set[str],
+    tombstones: ResolvedTombstones,
 ) -> FolderResult | None:
     """Route ``folder`` to its handler. Returns None if inbox is empty."""
     inbox_dir = config.inbox_path / folder
     if not inbox_dir.exists() or not any(inbox_dir.iterdir()):
+        if folder in SUPPORTED_TOMBSTONE_KINDS and (
+            forgotten_targets or lake_targets_for_kind(config, folder)
+        ):
+            return FolderResult(folder=folder, mode=FOLDER_MODES[folder])
         return None
 
     if folder == "pathology":
@@ -821,12 +976,20 @@ def _dispatch(
             folder, config, _transform_pathology, dry_run=dry_run
         )
     if folder == "fc_extractions":
-        return _ingest_fc_extractions(config, dry_run=dry_run)
+        return _ingest_fc_extractions(
+            config, dry_run=dry_run, forgotten_targets=forgotten_targets
+        )
     if folder == "fc_reviews":
-        return _ingest_fc_reviews(config, dry_run=dry_run)
+        return _ingest_fc_reviews(
+            config, dry_run=dry_run, forgotten_targets=forgotten_targets
+        )
     if folder == "cohorts":
-        return _ingest_cohorts(config, dry_run=dry_run)
+        return _ingest_cohorts(
+            config, dry_run=dry_run, forgotten_targets=forgotten_targets
+        )
     if folder == "runs":
         return _ingest_runs(config, dry_run=dry_run)
+    if folder == "tombstones":
+        return _ingest_tombstones(config, tombstones, dry_run=dry_run)
 
     raise RuntimeError(f"No ingest handler for folder: {folder}")

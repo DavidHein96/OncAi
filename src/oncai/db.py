@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
@@ -28,6 +29,7 @@ SCHEMA_MAPPING = {
     "fc_extractions": "extractions_raw",
     "fc_reviews": "extractions_silver",
     "runs": "runs",
+    "tombstones": "meta",
 }
 
 # Schemas that exist purely as transform destinations (no parquet ever lands
@@ -104,7 +106,66 @@ def _build_cohort_meta_table(con: duckdb.DuckDBPyConnection, lake_path: Path) ->
     return con.execute("SELECT COUNT(*) FROM cohort.meta").fetchone()[0]  # type: ignore[index]
 
 
-def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
+def _owned_schemas() -> set[str]:
+    return set(SCHEMA_MAPPING.values()) | TRANSFORM_SCHEMAS | STAGING_SCHEMAS
+
+
+def _reset_owned_schemas(con: duckdb.DuckDBPyConnection) -> None:
+    """Drop and recreate schemas that are disposable oncai projections."""
+    for schema in sorted(_owned_schemas()):
+        con.execute(f"DROP SCHEMA IF EXISTS {_q(schema)} CASCADE")
+        con.execute(f"CREATE SCHEMA {_q(schema)}")
+
+
+def _existing_tables(con: duckdb.DuckDBPyConnection, schema: str) -> set[str]:
+    rows = con.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = ?
+        """,
+        [schema],
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _drop_stale_multi_tables(
+    con: duckdb.DuckDBPyConnection,
+    schema: str,
+    active_tables: set[str],
+    *,
+    keep: set[str] | None = None,
+) -> list[str]:
+    """Drop multi-table folder tables no longer backed by lake parquets.
+
+    Returns the fully-qualified names of the tables that were dropped (e.g. a
+    batch whose lake parquet was pruned by a tombstone), so the caller can
+    report them as *removed* rather than as zero-row updates.
+    """
+    kept = keep or set()
+    dropped: list[str] = []
+    for table in sorted(_existing_tables(con, schema) - active_tables - kept):
+        qname = f"{_q(schema)}.{_q(table)}"
+        con.execute(f"DROP TABLE IF EXISTS {qname}")
+        dropped.append(f"{schema}.{table}")
+    return dropped
+
+
+@dataclass
+class FolderUpdate:
+    """Result of refreshing one lake folder's tables in the database.
+
+    ``updated`` maps ``schema.table`` to its row count; ``dropped`` lists the
+    fully-qualified tables removed because their backing lake parquet is gone
+    (e.g. pruned by a tombstone). Keeping them apart means the CLI reports a
+    drop as a *removal* instead of a misleading zero-row update.
+    """
+
+    updated: dict[str, int] = field(default_factory=dict)
+    dropped: list[str] = field(default_factory=list)
+
+
+def update_database_folder(config: OncaiConfig, folder: str) -> FolderUpdate:
     """
     Refresh a single lake folder's tables in the existing DuckDB database.
 
@@ -115,7 +176,8 @@ def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
         folder: Lake folder name (e.g. "cohorts", "fc_extractions")
 
     Returns:
-        Dict of schema.table_name -> row_count for affected tables
+        A ``FolderUpdate`` separating refreshed tables (with row counts) from
+        tables dropped because their lake parquet no longer exists.
 
     Raises:
         FileNotFoundError: If DB or lake folder doesn't exist
@@ -124,30 +186,34 @@ def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}. Run 'build-db' first.")
 
-    lake_folder = config.lake_path / folder
-    if not lake_folder.exists():
-        raise FileNotFoundError(f"Lake folder not found: {lake_folder}")
-
-    parquets = list(lake_folder.glob("*.parquet"))
-    if not parquets:
-        return {}
-
     schema = SCHEMA_MAPPING.get(folder)
     if schema is None:
         raise ValueError(f"No schema mapping configured for folder: {folder}")
+
+    lake_folder = config.lake_path / folder
+    parquets = sorted(lake_folder.glob("*.parquet")) if lake_folder.exists() else []
     con = duckdb.connect(str(db_path))
-    results = {}
+    result = FolderUpdate()
     transform_errors: list[str] = []
 
     try:
-        con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+        con.execute(f"CREATE SCHEMA IF NOT EXISTS {_q(schema)}")
         # Per-base .sql files write to *_transformed schemas; staging is for
         # ``oncai fc peek``. Both auto-created so callers don't need their
         # own CREATE SCHEMA boilerplate.
         for s in TRANSFORM_SCHEMAS | STAGING_SCHEMAS:
-            con.execute(f"CREATE SCHEMA IF NOT EXISTS {s}")
+            con.execute(f"CREATE SCHEMA IF NOT EXISTS {_q(s)}")
 
         if folder in MULTI_TABLE_FOLDERS:
+            active_tables = {path.stem for path in parquets}
+            result.dropped.extend(
+                _drop_stale_multi_tables(
+                    con,
+                    schema,
+                    active_tables,
+                    keep={"meta"} if folder == "cohorts" else None,
+                )
+            )
             for parquet_path in parquets:
                 table_name = parquet_path.stem
                 full_name = f"{schema}.{table_name}"
@@ -158,7 +224,7 @@ def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
                         "SELECT * FROM read_parquet(?)",
                         [str(parquet_path)],
                     )
-                    results[full_name] = _count_rows(con, qname)
+                    result.updated[full_name] = _count_rows(con, qname)
                     _run_sibling_sql(con, parquet_path, transform_errors)
                 except Exception as e:
                     print(f"Error creating table {full_name}: {e}")
@@ -166,10 +232,10 @@ def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
             if folder == "cohorts":
                 try:
                     meta_rows = _build_cohort_meta_table(con, config.lake_path)
-                    results["cohort.meta"] = meta_rows
+                    result.updated["cohort.meta"] = meta_rows
                 except Exception as e:
                     print(f"Error creating cohort.meta: {e}")
-        else:
+        elif parquets:
             table_name = folder
             full_name = f"{schema}.{table_name}"
             qname = f"{_q(schema)}.{_q(table_name)}"
@@ -184,7 +250,7 @@ def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
                     "SELECT * FROM read_parquet(?)",
                     [parquet_path_str],
                 )
-                results[full_name] = _count_rows(con, qname)
+                result.updated[full_name] = _count_rows(con, qname)
                 _run_sibling_sql(con, lake_folder / f"{folder}.parquet", transform_errors)
             except Exception as e:
                 print(f"Error creating table {full_name}: {e}")
@@ -196,7 +262,7 @@ def update_database_folder(config: OncaiConfig, folder: str) -> dict[str, int]:
         for m in transform_errors:
             print(f"  - {m}")
 
-    return results
+    return result
 
 
 def build_database(
@@ -235,12 +301,10 @@ def build_database(
     results = {}
     transform_errors: list[str] = []
 
-    # Create all schemas upfront — including transform/scratch schemas so per-base
-    # .sql files and ``oncai fc peek`` can write into them without their own
-    # CREATE SCHEMA boilerplate.
-    schemas_needed = set(SCHEMA_MAPPING.values()) | TRANSFORM_SCHEMAS | STAGING_SCHEMAS
-    for schema in schemas_needed:
-        con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    # Rebuild all oncai-owned schemas from the lake. This keeps the DuckDB file
+    # a disposable projection: stale base tables and stale SQL-derived tables
+    # disappear when their backing lake files disappear.
+    _reset_owned_schemas(con)
 
     # Scan all known folders: dataset folders + any SCHEMA_MAPPING folders that exist
     all_folders = list(

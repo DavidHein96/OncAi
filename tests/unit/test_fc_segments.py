@@ -27,6 +27,7 @@ from oncai.fc_extraction.manifest import (
     tool_schemas_for,
 )
 from oncai.ingest import run_ingest
+from oncai.tombstones import TombstoneAction, write_tombstone_event
 
 
 def _record(
@@ -181,6 +182,91 @@ class TestIngestFcExtractions:
             in note
             for note in results[0].notes
         )
+
+    def test_tombstoned_batch_is_skipped_and_pruned(self, oncai_config):
+        bd = oncai_config.inbox_path / "fc_extractions" / "mybatch"
+        _write_segment(bd, 1, [_record("R1", "old")])
+        (bd / "mybatch.sql").write_text(
+            "CREATE OR REPLACE TABLE extractions_transformed.mybatch AS "
+            "SELECT 1 AS n;"
+        )
+
+        run_ingest(oncai_config, folder="fc_extractions")
+        assert (oncai_config.lake_path / "fc_extractions" / "mybatch.parquet").exists()
+        assert (oncai_config.lake_path / "fc_extractions" / "mybatch.sql").exists()
+
+        write_tombstone_event(
+            oncai_config,
+            kind="fc_extractions",
+            target="mybatch",
+            action=TombstoneAction.FORGET,
+            actor="test",
+            at="2026-06-12T12:00:00Z",
+            event_id="aaaaaaaaaaaaaaaa",
+        )
+        results = run_ingest(oncai_config, folder="fc_extractions")
+
+        assert not (
+            oncai_config.lake_path / "fc_extractions" / "mybatch.parquet"
+        ).exists()
+        assert not (oncai_config.lake_path / "fc_extractions" / "mybatch.sql").exists()
+        notes = " ".join(results[0].notes)
+        assert "mybatch: skipped because tombstoned" in notes
+        assert "mybatch: pruned lake projection — tombstoned" in notes
+
+    def test_orphan_lake_parquet_pruned_loudly_without_tombstone(self, oncai_config):
+        # A real batch is ingested, then a stray lake parquet with no inbox
+        # source and no tombstone appears (e.g. the inbox folder was hand-rm'd).
+        # Reconcile prunes the orphan and says so loudly; the real batch stays.
+        bd = oncai_config.inbox_path / "fc_extractions" / "keep"
+        _write_segment(bd, 1, [_record("R1", "x")])
+        run_ingest(oncai_config, folder="fc_extractions")
+
+        lake_dir = oncai_config.lake_path / "fc_extractions"
+        ghost = lake_dir / "ghost.parquet"
+        pl.DataFrame({"record_id": ["Z"]}).write_parquet(ghost)
+
+        results = run_ingest(oncai_config, folder="fc_extractions")
+
+        assert not ghost.exists()
+        assert (lake_dir / "keep.parquet").exists()
+        notes = " ".join(results[0].notes)
+        assert "ghost: pruned ORPHAN lake projection" in notes
+        assert "oncai forget fc_extractions ghost" in notes
+
+    def test_revive_rebuilds_a_forgotten_batch(self, oncai_config):
+        bd = oncai_config.inbox_path / "fc_extractions" / "mybatch"
+        _write_segment(bd, 1, [_record("R1", "old")])
+        run_ingest(oncai_config, folder="fc_extractions")
+        out = oncai_config.lake_path / "fc_extractions" / "mybatch.parquet"
+        assert out.exists()
+
+        write_tombstone_event(
+            oncai_config,
+            kind="fc_extractions",
+            target="mybatch",
+            action=TombstoneAction.FORGET,
+            actor="test",
+            at="2026-06-12T12:00:00Z",
+            event_id="aaaaaaaaaaaaaaaa",
+        )
+        run_ingest(oncai_config, folder="fc_extractions")
+        assert not out.exists()
+
+        # A later revive supersedes the forget. The inbox source still exists
+        # (logical-only delete), so the next ingest rebuilds the parquet.
+        write_tombstone_event(
+            oncai_config,
+            kind="fc_extractions",
+            target="mybatch",
+            action=TombstoneAction.REVIVE,
+            actor="test",
+            at="2026-06-12T13:00:00Z",
+            event_id="bbbbbbbbbbbbbbbb",
+        )
+        run_ingest(oncai_config, folder="fc_extractions")
+        assert out.exists()
+        assert pl.read_parquet(out).height == 1
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,11 @@ review, retire an old extraction batch, or drop a cohort you no longer want —
 and have that removal hold *everywhere*, not just on the one machine you ran it
 on.
 
-Status: **design / not yet implemented.** This document is the contract to
-agree on before any code lands.
+Status: **v1 implemented for `fc_extractions`, `fc_reviews`, and `cohorts`.**
+Tombstones sync through `inbox/tombstones/`, ingest skips forgotten sources and
+prunes their local lake projection, and `build-db` rebuilds from the pruned lake.
+Physical garbage collection, remote deletion, `pathology`, and `runs`
+tombstones are deferred.
 
 ## The problem
 
@@ -98,9 +101,9 @@ membership is resolved from the full set every ingest, never from arrival order.
 |---|---|---|---|---|
 | `fc_extractions` | STATIC | a batch folder `<batch>/` | `<batch>` | drop `lake/fc_extractions/<batch>.parquet` + its `extractions_raw.<batch>` table |
 | `fc_reviews` | STATIC | a batch's review pairs `<batch>/` | `<batch>` | drop `lake/fc_reviews/<batch>.parquet` + `extractions_silver.<batch>` (and the gold reshape that reads it) |
-| `cohorts` | NAMED | a `<name>.cohort.json` | `<name>` | drop that cohort's parquet + table |
-| `pathology` | DATED | a `YYYY-MM-DD_<label>.csv` | the filename stem | exclude that file from the replay; the single merged parquet rebuilds without its rows |
-| `runs` | MANIFEST | a `<run_id>.run.json` | `<run_id>` | exclude that row from `runs.parquet` (audit log — forgetting a run should be rare) |
+| `cohorts` | NAMED | a `<name>.csv` | `<name>` | drop that cohort's parquet + table |
+| `pathology` | DATED | a `YYYY-MM-DD_<label>.csv` | the filename stem | deferred for v1 |
+| `runs` | MANIFEST | a `<run_id>.run.json` | `<run_id>` | deferred for v1 |
 
 The unit is always "one inbox source as the user thinks of it." For the
 per-source modes (STATIC/NAMED) a forget removes a whole parquet/table; for the
@@ -130,12 +133,22 @@ a run that forgets things says so out loud rather than silently shrinking.
 
 On the DuckDB side:
 
-- **`oncai build-db`** already does `db_path.unlink()` + full rebuild from the
-  lake, so it self-corrects the moment the lake is correct — no change needed
-  beyond the lake being right.
-- **`oncai db update <folder>`** is incremental (`CREATE OR REPLACE TABLE` per
-  parquet) and must additionally **`DROP TABLE`** for any table whose backing
-  parquet was pruned. That's the one DB-layer gap to close.
+- **`oncai build-db`** does `db_path.unlink()` + full rebuild from the lake, so
+  it self-corrects the moment the lake is correct. It is the **complete** reset.
+- **`oncai db update <folder>`** is incremental: it `CREATE OR REPLACE`s each
+  present parquet's table and **`DROP TABLE`s** any base table whose backing
+  parquet was pruned (reported as a removal, not a zero-row update).
+
+> **Caveat — derived tables need a full rebuild.** `db update` only reconciles a
+> folder's own *base* tables (`extractions_raw.<batch>`,
+> `extractions_silver.<batch>`, cohort tables). It does **not** drop the tables a
+> forgotten batch's `.sql` sidecar built in the *transform* schemas
+> (`extractions_transformed`, `extractions_gold`) — the incremental path has no
+> record of which derived tables a now-pruned batch produced. So after
+> forgetting a batch that had a reshape sidecar, run a full **`oncai build-db`**
+> (which `DROP SCHEMA … CASCADE`s every owned schema) to be sure no stale
+> derived rows survive. Rule of thumb: **tombstoning anything with a `.sql`
+> reshape ⇒ do a full `build-db`, not just `db update`.**
 
 ## Commands
 
@@ -153,13 +166,17 @@ oncai forget fc_reviews v1 --reason "..." --yes
 oncai revive fc_reviews v1 --yes
 
 # See what's forgotten (the tombstone log, projected like any other folder).
-oncai forget --list           # or:  SELECT * FROM meta.tombstones WHERE active
+oncai forget --list
+oncai ingest tombstones       # optional: project to lake/tombstones/tombstones.parquet
+oncai build-db                # query as: SELECT * FROM meta.tombstones WHERE active
 ```
 
 `oncai forget` is the guided front door; it writes the event and prunes the
-local lake parquet + drops the local table immediately so you see the effect
+local lake parquet/SQL sidecar immediately so you see the local lake effect
 without waiting for a full ingest. Reconcile-on-ingest is the *invariant* that
-makes the same thing happen on every other machine after they `pull`.
+makes the same thing happen on every other machine after they `pull`. Run
+`oncai build-db` to rebuild the DuckDB projection; `oncai db update <folder>`
+also drops stale base tables for the touched multi-table folder.
 
 The tombstone log is itself projectable: a MANIFEST-style union into
 `lake/tombstones/tombstones.parquet` → `meta.tombstones`, with a resolved

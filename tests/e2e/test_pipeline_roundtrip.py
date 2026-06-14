@@ -150,7 +150,7 @@ def test_full_pipeline_with_fake_llm(pipeline_env: tuple[Path, OncaiConfig]) -> 
                 "record_diagnosis",
                 RecordDiagnosis(
                     note_id="R1",
-                    comment="DIAGNOSIS: Clear cell renal cell carcinoma, T2N0M0.",
+                    evidence=["DIAGNOSIS: Clear cell renal cell carcinoma, T2N0M0."],
                     diagnosis_date=ApproxDate(date="2024-01-15", precision=3),
                     diagnosis_type=DiagnosisType.PRIMARY,
                     diagnosis_name="clear cell renal cell carcinoma",
@@ -163,7 +163,7 @@ def test_full_pipeline_with_fake_llm(pipeline_env: tuple[Path, OncaiConfig]) -> 
                 "record_diagnosis",
                 RecordDiagnosis(
                     note_id="R2",
-                    comment="DIAGNOSIS: Papillary RCC, type 1.",
+                    evidence=["DIAGNOSIS: Papillary RCC, type 1."],
                     diagnosis_date=ApproxDate(date="2024-01-15", precision=3),
                     diagnosis_type=DiagnosisType.PRIMARY,
                     diagnosis_name="papillary RCC",
@@ -173,7 +173,7 @@ def test_full_pipeline_with_fake_llm(pipeline_env: tuple[Path, OncaiConfig]) -> 
                 "record_treatment",
                 RecordTreatment(
                     note_id="R2",
-                    comment="Patient underwent radical nephrectomy.",
+                    evidence=["Patient underwent radical nephrectomy."],
                     treatment_date=ApproxDate(date="2024-01-15", precision=3),
                     treatment_name="radical nephrectomy",
                     treatment_type="surgery",

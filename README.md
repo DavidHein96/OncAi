@@ -55,6 +55,7 @@ oncai push fc_extractions
 │ inbox/fc_extractions/  │  push   │  append-only,    │         │  disposable      │        (raw.pathology,
 │ inbox/fc_reviews/      │         │  content-hashed  │         │  projection      │         cohort.<name>,
 │ inbox/runs/            │         └──────────────────┘         └──────────────────┘         extractions_raw,
+│ inbox/tombstones/      │                                                                    meta.tombstones,
 └────────────────────────┘                                                                   extractions_silver/gold,
    only the inbox is synced — the lake + DuckDB never leave the machine                      runs.runs)
 ```
@@ -231,6 +232,7 @@ The multi-line path always applies generic cleaning. Two source-specific steps a
 - `inbox/cohorts/<name>.csv` → `oncai ingest cohorts` (one parquet per file; the filename is the cohort name).
 - `inbox/fc_extractions/<batch>/NNN.jsonl` → `oncai ingest fc_extractions` (a batch is a folder of numbered segments; segments merge into one lake parquet, highest segment per record wins). `fc run-single` promotes its output here automatically.
 - `inbox/fc_reviews/<batch>/<batch>.NNN.review_pkg.json` + `<batch>.NNN.reviews.jsonl` → `oncai ingest fc_reviews` (a batch's per-segment reviews merge into `extractions_silver.<batch>`; approved events only, highest segment per note wins).
+- `inbox/tombstones/*.tombstone.json` → `oncai ingest tombstones` (append-only forget/revive events; active forgets are honored by `ingest` for `fc_extractions`, `fc_reviews`, and `cohorts`).
 
 ### Skip the lake for ready-made notes
 
@@ -254,6 +256,7 @@ oncai fc run-single path_kidney_basic --jsonl notes.jsonl --batch v1 --backend g
 | `extractions_transformed` | `fc_extractions/<batch>/<batch>.sql` | Materialized derived tables from raw FC batches |
 | `scratch` | `oncai fc peek` | Throwaway per-event layout for a quick look (cleared on rebuild) |
 | `runs` | `runs` | Run-log history (one row per `fc run-single`) |
+| `meta` | `tombstones` | Tombstone audit log (`meta.tombstones`) |
 
 Per-batch SQL transforms live beside the inbox batch artifacts:
 `inbox/fc_extractions/<batch>/<batch>.sql` mirrors to

@@ -27,6 +27,15 @@ from oncai.lake import (
     push_inbox_to_remote,
 )
 from oncai.schemas import get_schema, list_schemas
+from oncai.tombstones import (
+    SUPPORTED_TOMBSTONE_KINDS,
+    TombstoneAction,
+    inbox_source_paths_for_target,
+    lake_paths_for_target,
+    prune_lake_target,
+    resolve_tombstones,
+    write_tombstone_event,
+)
 
 from ._shared import console, get_config
 
@@ -268,6 +277,60 @@ def _run_health_checks(config: OncaiConfig) -> None:
 
 
 # -----------------------------------------------------------------------------
+# Tombstone helpers
+# -----------------------------------------------------------------------------
+
+
+def _validate_forget_args(kind: str | None, target: str | None) -> tuple[str, str]:
+    if kind is None or target is None:
+        supported = ", ".join(sorted(SUPPORTED_TOMBSTONE_KINDS))
+        console.print(f"[red]Kind and target are required. Supported: {supported}[/red]")
+        raise typer.Exit(1)
+    if kind not in SUPPORTED_TOMBSTONE_KINDS:
+        supported = ", ".join(sorted(SUPPORTED_TOMBSTONE_KINDS))
+        console.print(f"[red]Unsupported kind: {kind}. Supported: {supported}[/red]")
+        raise typer.Exit(1)
+    return kind, target
+
+
+def _print_tombstone_paths(config: OncaiConfig, kind: str, target: str) -> None:
+    inbox_paths = inbox_source_paths_for_target(config, kind, target)
+    lake_paths = lake_paths_for_target(config, kind, target)
+
+    console.print("[cyan]Inbox source[/cyan]")
+    for path in inbox_paths:
+        marker = "[green]exists[/green]" if path.exists() else "[dim]missing[/dim]"
+        console.print(f"  {marker} {path}")
+
+    console.print("[cyan]Lake projection[/cyan]")
+    for path in lake_paths:
+        marker = "[green]exists[/green]" if path.exists() else "[dim]missing[/dim]"
+        console.print(f"  {marker} {path}")
+
+
+def _print_tombstone_list(config: OncaiConfig) -> None:
+    state = resolve_tombstones(config)
+    if state.errors:
+        for error in state.errors:
+            console.print(f"[yellow]{error}[/yellow]")
+
+    events = sorted(state.active_events(), key=lambda event: (event.kind, event.target))
+    if not events:
+        console.print("[dim]No active tombstones[/dim]")
+        return
+
+    table = Table(title="Active Tombstones")
+    table.add_column("Kind", style="cyan")
+    table.add_column("Target")
+    table.add_column("At")
+    table.add_column("Actor")
+    table.add_column("Reason")
+    for event in events:
+        table.add_row(event.kind, event.target, event.at, event.actor, event.reason)
+    console.print(table)
+
+
+# -----------------------------------------------------------------------------
 # Commands
 # -----------------------------------------------------------------------------
 
@@ -441,6 +504,99 @@ def build_db(
     console.print(f"\n[green]✓[/green] Database saved to {config.db_path}")
 
 
+def forget(
+    kind: str | None = typer.Argument(
+        None,
+        help="Source kind to forget: fc_extractions, fc_reviews, or cohorts",
+    ),
+    target: str | None = typer.Argument(
+        None,
+        help="Source target to forget, e.g. a batch name or cohort name",
+    ),
+    reason: str = typer.Option("", "--reason", "-r", help="Audit reason"),
+    actor: str | None = typer.Option(None, "--actor", help="Override actor name"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Append the forget event"),
+    list_: bool = typer.Option(
+        False, "--list", help="List active tombstones instead of writing one"
+    ),
+):
+    """Logically remove an inbox source from lake/DB projections."""
+    config = get_config()
+    if list_:
+        _print_tombstone_list(config)
+        return
+
+    kind, target = _validate_forget_args(kind, target)
+    if not yes:
+        console.print("[blue]Preview forget[/blue]")
+        _print_tombstone_paths(config, kind, target)
+        console.print("[yellow]Re-run with --yes to append the tombstone.[/yellow]")
+        return
+
+    try:
+        event = write_tombstone_event(
+            config,
+            kind=kind,
+            target=target,
+            action=TombstoneAction.FORGET,
+            reason=reason,
+            actor=actor,
+        )
+        pruned = prune_lake_target(config, kind, target)
+    except (FileExistsError, ValueError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[green]✓[/green] Tombstoned {kind}/{target}")
+    console.print(f"  Event: {event.path}")
+    for path in pruned:
+        console.print(f"  [dim]pruned {path}[/dim]")
+    console.print(
+        f"[yellow]Run 'oncai db update {kind}' (or 'oncai build-db') to drop the "
+        f"table, then push the inbox so the tombstone reaches remote.[/yellow]"
+    )
+
+
+def revive(
+    kind: str = typer.Argument(
+        ...,
+        help="Source kind to revive: fc_extractions, fc_reviews, or cohorts",
+    ),
+    target: str = typer.Argument(
+        ...,
+        help="Source target to revive, e.g. a batch name or cohort name",
+    ),
+    reason: str = typer.Option("", "--reason", "-r", help="Audit reason"),
+    actor: str | None = typer.Option(None, "--actor", help="Override actor name"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Append the revive event"),
+):
+    """Undo a logical removal by appending a revive event."""
+    config = get_config()
+    kind, target = _validate_forget_args(kind, target)
+    if not yes:
+        console.print("[blue]Preview revive[/blue]")
+        _print_tombstone_paths(config, kind, target)
+        console.print("[yellow]Re-run with --yes to append the revive event.[/yellow]")
+        return
+
+    try:
+        event = write_tombstone_event(
+            config,
+            kind=kind,
+            target=target,
+            action=TombstoneAction.REVIVE,
+            reason=reason,
+            actor=actor,
+        )
+    except (FileExistsError, ValueError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[green]✓[/green] Revived {kind}/{target}")
+    console.print(f"  Event: {event.path}")
+    console.print("[yellow]Run ingest to rebuild the local projection.[/yellow]")
+
+
 def status(
     check: bool = typer.Option(
         False, "--check", help="Run data quality checks and verify inbox sidecars"
@@ -502,6 +658,8 @@ def register_main_commands(app: typer.Typer) -> None:
     app.command()(push)
     app.command()(ingest)
     app.command(name="build-db")(build_db)
+    app.command()(forget)
+    app.command()(revive)
     app.command()(status)
     app.command()(schemas)
     app.command()(version)

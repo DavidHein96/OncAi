@@ -145,6 +145,7 @@ FOLDER_MODES: dict[str, IngestMode] = {
     "fc_reviews": IngestMode.STATIC,
     "cohorts": IngestMode.NAMED,
     "runs": IngestMode.MANIFEST,
+    "tombstones": IngestMode.MANIFEST,
 }
 
 

@@ -29,6 +29,7 @@ def tmp_oncai_env(tmp_path, monkeypatch):
         "runs",
         "fc_extractions",
         "fc_reviews",
+        "tombstones",
     ]:
         (data_dir / "lake" / subfolder).mkdir(parents=True)
         (data_dir / "inbox" / subfolder).mkdir(parents=True)

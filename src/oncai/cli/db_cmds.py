@@ -35,23 +35,30 @@ def db_update(
     config = get_config()
 
     try:
-        results = update_database_folder(config, folder)
+        result = update_database_folder(config, folder)
     except (FileNotFoundError, ValueError) as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from e
 
-    if not results:
+    if not result.updated and not result.dropped:
         console.print(f"[yellow]No parquet files found in lake/{folder}/[/yellow]")
         return
 
-    table = Table(title=f"Updated: {folder}")
-    table.add_column("Table", style="cyan")
-    table.add_column("Rows", justify="right")
+    if result.updated:
+        table = Table(title=f"Updated: {folder}")
+        table.add_column("Table", style="cyan")
+        table.add_column("Rows", justify="right")
+        for table_name, row_count in result.updated.items():
+            table.add_row(table_name, f"{row_count:,}")
+        console.print(table)
 
-    for table_name, row_count in results.items():
-        table.add_row(table_name, f"{row_count:,}")
+    # Tables whose lake parquet is gone (e.g. pruned by a tombstone) are dropped,
+    # not refreshed \u2014 report them separately so a removal doesn't read as an
+    # empty table that's still present.
+    for dropped in result.dropped:
+        console.print(f"[yellow]\u2717 dropped {dropped} (no backing parquet)[/yellow]")
 
-    console.print(table)
-    console.print(
-        f"\n[green]\u2713[/green] {len(results)} table(s) updated in {config.db_path}"
-    )
+    summary = f"{len(result.updated)} table(s) updated"
+    if result.dropped:
+        summary += f", {len(result.dropped)} dropped"
+    console.print(f"\n[green]\u2713[/green] {summary} in {config.db_path}")

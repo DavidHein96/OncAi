@@ -363,6 +363,8 @@ def get_inbox_files(config: OncaiConfig) -> dict[str, list[Path]]:
                 + list(inbox_folder.rglob("*.jsonl"))
                 + list(inbox_folder.rglob("*.review_pkg.json"))
                 + list(inbox_folder.rglob("*.run.json"))
+                + list(inbox_folder.rglob("*.tombstone.json"))
+                + list(inbox_folder.rglob("*.sql"))
                 + list(inbox_folder.rglob("*.parquet"))
             )
             if files:

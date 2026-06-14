@@ -66,3 +66,7 @@ class TestGetDatasetFolders:
     def test_contains_fc_reviews(self):
         folders = get_dataset_folders()
         assert "fc_reviews" in folders
+
+    def test_contains_tombstones(self):
+        folders = get_dataset_folders()
+        assert "tombstones" in folders
