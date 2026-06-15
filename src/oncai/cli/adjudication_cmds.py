@@ -91,6 +91,4 @@ def adjudication_create(
     console.print(f"[green]✓[/green] Wrote adjudication package: {package_path}")
     console.print(f"  Descriptor: {descriptor_path}")
     console.print(f"  Disagreements: {package['summary']['disagreements']}")
-    console.print(
-        "  Open it in the review app once adjudication-package support is wired."
-    )
+    console.print("  Open it in the review app to write the adjudications log.")

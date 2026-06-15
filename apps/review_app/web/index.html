@@ -11,7 +11,7 @@
     <header>
       <h1>FC Extraction — Physician Review</h1>
       <span class="sub" id="ctx"></span>
-      <span class="sub savepath" id="savepath" title="" aria-label="reviews file"></span>
+      <span class="sub savepath" id="savepath" title="" aria-label="log file"></span>
       <div class="spacer"></div>
       <span class="sub">Reviewer</span>
       <input type="text" id="reviewer" style="width: 140px" placeholder="your name" />
@@ -32,13 +32,13 @@
     </header>
     <section id="picker" class="picker" style="display: none">
       <div class="pcard">
-        <h2>Open a review package</h2>
-        <p>Select a <code>.review_pkg.json</code> file to start reviewing.</p>
+        <h2>Open a package</h2>
+        <p>Select a <code>.review_pkg.json</code> or <code>.adjudication_pkg.json</code> file.</p>
         <input type="file" id="pkgfile" accept=".json,application/json" />
         <div id="pkgerr" class="pkgerr"></div>
         <p class="hint">
-          No package yet? Build one with <code>oncai fc review-package &lt;batch&gt;</code>, then
-          open the <code>.review_pkg.json</code> it writes.
+          No package yet? Build one with <code>oncai fc review-package &lt;batch&gt;</code> or
+          <code>oncai adjudication create &lt;round&gt;</code>.
         </p>
       </div>
     </section>

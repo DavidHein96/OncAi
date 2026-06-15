@@ -9,12 +9,15 @@ path-traversal guard on static file serving.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import tomllib
 from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import server
 
@@ -90,6 +93,7 @@ def test_validate_review_rejects_unknown_anchor():
     "name, expected",
     [
         ("batch.review_pkg.json", "batch.reviews.jsonl"),
+        ("round.adjudication_pkg.json", "round.adjudications.jsonl"),
         ("data.json", "data.reviews.jsonl"),
     ],
 )
@@ -126,6 +130,16 @@ def test_log_replay_is_last_write_wins(tmp_path):
     assert len(state.reviews) == 1
 
 
+def test_log_replay_accepts_adjudication_key(tmp_path):
+    log = tmp_path / "out.adjudications.jsonl"
+    log.write_text(
+        '{"adjudication_key": "a1", "decision": "left", "reviewed_at": "1"}\n'
+        '{"adjudication_key": "a1", "decision": "right", "reviewed_at": "2"}\n'
+    )
+    state = server.ReviewState({}, log, reviewer="")
+    assert state.reviews["a1"]["decision"] == "right"
+
+
 def test_save_review_appends_and_updates(tmp_path):
     state = _state(tmp_path)
     r1 = state.save_review({"event_key": "k1", "verdict": "approved"})
@@ -145,6 +159,16 @@ def test_save_review_requires_event_key(tmp_path):
 def test_save_review_rejects_bad_date(tmp_path):
     with pytest.raises(ValueError, match="invalid date"):
         _state(tmp_path).save_review({"event_key": "k1", "edits": {"diagnosis_date": {"date": "Feb 2026"}}})
+
+
+def test_save_adjudication_rejects_bad_date(tmp_path):
+    with pytest.raises(ValueError, match="invalid date"):
+        _state(tmp_path).save_review(
+            {
+                "adjudication_key": "a1",
+                "adjudicated_fields": {"diagnosis_date": {"date": "Feb 2026"}},
+            }
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -234,6 +258,27 @@ def test_load_returns_absolute_reviews_path(port):
     assert status == 200
     loaded = json.loads(raw)
     assert Path(loaded["reviews_path"]).is_absolute()
+
+
+def test_load_adjudication_package_uses_adjudications_log_path(port):
+    package = {
+        "package_type": "adjudication",
+        "round": "compare v1",
+        "definition_name": "D",
+        "inputs": {"left": {"label": "left"}, "right": {"label": "right"}},
+        "field_schema": {},
+        "patients": [],
+    }
+
+    status, raw = _request(port, "POST", "/api/load", package)
+
+    assert status == 200
+    loaded = json.loads(raw)
+    assert loaded["loaded"] is True
+    assert loaded["package_type"] == "adjudication"
+    assert loaded["round"] == "compare v1"
+    assert Path(loaded["reviews_path"]).is_absolute()
+    assert loaded["reviews_path"].endswith("compare_v1.adjudications.jsonl")
 
 
 def test_data_payload_includes_reviewer_added_events(port):

@@ -4,12 +4,14 @@
 # oncai-review
 
 A local, dependency-free web app for physicians to review structured extractions
-from clinical notes — approve, reject, or edit each extracted event, with the
-source note and supporting evidence shown side by side.
+from clinical notes and adjudicate cross-batch discrepancies, with the source
+note and supporting evidence shown side by side.
 
-The reviewer opens a `*.review_pkg.json` package, adjudicates each event, and the
-verdicts are written to a `*.reviews.jsonl` sidecar. Everything runs on
-`localhost` — **no data leaves the machine** and no network calls are made.
+The reviewer opens a `*.review_pkg.json` package or a
+`*.adjudication_pkg.json` package. Verdicts are written to `*.reviews.jsonl`;
+cross-batch adjudication decisions are written to `*.adjudications.jsonl`.
+Everything runs on `localhost` — **no data leaves the machine** and no network
+calls are made.
 
 ![The review UI: source note with evidence spans highlighted on the left, editable extracted fields on the right.](docs/screenshot.png)
 
@@ -47,25 +49,27 @@ python server.py
 
 # ...or open a package immediately:
 python server.py --package path/to/batch.review_pkg.json
+python server.py --package path/to/round.adjudication_pkg.json
 ```
 
-Then review in the browser tab that opens. Verdicts are saved to:
+Then review/adjudicate in the browser tab that opens. Logs are saved to:
 
 - the package's folder, when you pass `--package`, or
-- `~/Documents/oncai_reviews/<batch>.reviews.jsonl`, when you open a package from
-  the in-app file picker (the browser can't reveal the chosen file's folder, so a
-  stable home-dir location keyed by batch name is used).
+- `~/Documents/oncai_reviews/<batch>.reviews.jsonl` or
+  `~/Documents/oncai_reviews/<round>.adjudications.jsonl`, when you open a
+  package from the in-app file picker (the browser can't reveal the chosen
+  file's folder, so a stable home-dir location keyed by package name is used).
 
 ### CLI options
 
-| Flag              | Default             | Description                                                                 |
-| ----------------- | ------------------- | --------------------------------------------------------------------------- |
-| `--package`, `-p` | _(none)_            | Path to a `*.review_pkg.json`. If omitted, pick one in the app.             |
-| `--reviews`       | _alongside package_ | Output reviews JSONL path.                                                  |
-| `--host`          | `127.0.0.1`         | Host to bind.                                                               |
-| `--port`          | `8765`              | Preferred port; auto-falls back to an open one if busy (`0` = OS-assigned). |
-| `--reviewer`      | _(empty)_           | Reviewer name stamped on each verdict.                                      |
-| `--no-browser`    | _off_               | Do not auto-open a browser.                                                 |
+| Flag              | Default             | Description                                                                                  |
+| ----------------- | ------------------- | -------------------------------------------------------------------------------------------- |
+| `--package`, `-p` | _(none)_            | Path to a `*.review_pkg.json` or `*.adjudication_pkg.json`. If omitted, pick one in the app. |
+| `--reviews`       | _alongside package_ | Output JSONL path.                                                                           |
+| `--host`          | `127.0.0.1`         | Host to bind.                                                                                |
+| `--port`          | `8765`              | Preferred port; auto-falls back to an open one if busy (`0` = OS-assigned).                  |
+| `--reviewer`      | _(empty)_           | Reviewer name stamped on each verdict.                                                       |
+| `--no-browser`    | _off_               | Do not auto-open a browser.                                                                  |
 
 ## Building standalone executables
 
@@ -138,6 +142,13 @@ A `*.review_pkg.json` is a single JSON object with:
 The matching `*.reviews.jsonl` output has one JSON object per saved verdict:
 `event_key`, `mrn`, `verdict` (`approved` / `rejected`), any field `edits`, a
 free-text `comment`, the `reviewer`, and a `reviewed_at` timestamp.
+
+A `*.adjudication_pkg.json` has the same `field_schema`/`patients` envelope, but
+each event carries `left` and `right` outputs plus the comparison status. The
+matching `*.adjudications.jsonl` records one decision per disputed item:
+`adjudication_key`, `decision` (`left` / `right` / `custom` / `exclude`),
+optional `adjudicated_fields`, a free-text `comment`, the `reviewer`, and a
+`reviewed_at` timestamp.
 
 ## Repository layout
 

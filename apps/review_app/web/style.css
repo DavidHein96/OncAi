@@ -442,6 +442,79 @@ mark.hl.flash {
   font-weight: 400;
 }
 
+.comparegrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 1100px) {
+  .comparegrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sidepanel {
+  border: 1px solid var(--bd);
+  border-radius: 7px;
+  background: #fbfbfd;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sidepanel.missing {
+  border-style: dashed;
+  color: var(--mut);
+}
+
+.sidetitle {
+  padding: 7px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  background: #f3f4f6;
+  border-bottom: 1px solid var(--bd);
+}
+
+.sideempty {
+  padding: 12px 9px;
+  font-size: 12px;
+}
+
+.sidepanel dl {
+  margin: 0;
+}
+
+.siderow {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+  padding: 7px 9px;
+  border-top: 1px solid #eef0f3;
+}
+
+.siderow:first-child {
+  border-top: 0;
+}
+
+.siderow.compared {
+  background: #fff7ed;
+}
+
+.siderow dt {
+  color: var(--mut);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.siderow dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .fld {
   margin-bottom: 10px;
 }

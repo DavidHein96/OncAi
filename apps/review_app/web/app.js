@@ -61,7 +61,7 @@ function wireQuit() {
   const b = document.getElementById("quit");
   if (!b) return;
   b.onclick = async () => {
-    if (!confirm("Stop the review app? Saved reviews are kept.")) return;
+    if (!confirm("Stop the review app? Saved logs are kept.")) return;
     b.disabled = true;
     try {
       await fetch("/api/quit", { method: "POST" });
@@ -104,6 +104,18 @@ function resetState() {
   S.sel = null;
   S.reviews = {};
   S.dirty = {};
+}
+
+function packageType() {
+  return (S.data && S.data.package_type) || "review";
+}
+
+function isAdjudicationPackage() {
+  return packageType() === "adjudication";
+}
+
+function eventReviewKey(ev) {
+  return String((ev && (ev.adjudication_key || ev.event_key)) || "");
 }
 
 // Show last two path segments (…/folder/file) — full path kept in title + copy.
@@ -154,7 +166,7 @@ function hasUnsavedReviewWork() {
   if (document.querySelector(".fld.changed")) return true;
   if (!S.data) return false;
   return S.data.patients.some((p) =>
-    p.events.some((ev) => ev.is_new_event && !S.reviews[ev.event_key])
+    p.events.some((ev) => ev.is_new_event && !S.reviews[eventReviewKey(ev)])
   );
 }
 
@@ -165,7 +177,9 @@ function wirePackageSwitcher() {
   b.onclick = async () => {
     if (
       hasUnsavedReviewWork() &&
-      !confirm("Discard unapplied field edits/new entities and close this package? Saved reviews are kept.")
+      !confirm(
+        "Discard unapplied field edits/new entities and close this package? Saved logs are kept."
+      )
     ) {
       return;
     }
@@ -193,12 +207,15 @@ function hydrate(data) {
   S.reviews = data.reviews || {};
   S.byMrn = {};
   S.sel = null;
-  document.getElementById("ctx").textContent =
-    (data.definition_name || "") + " · batch " + (data.batch || "");
+  const ctxName =
+    data.package_type === "adjudication"
+      ? "round " + (data.round || "")
+      : "batch " + (data.batch || "");
+  document.getElementById("ctx").textContent = (data.definition_name || "") + " · " + ctxName;
   const sp = document.getElementById("savepath");
   if (data.reviews_path) {
     sp.textContent = "· saving to " + data.reviews_path;
-    sp.title = "Reviews file (click to copy): " + data.reviews_path;
+    sp.title = "Log file (click to copy): " + data.reviews_path;
     sp.onclick = () => copyText(data.reviews_path, sp);
   } else {
     sp.textContent = "";
@@ -219,7 +236,7 @@ function hydrate(data) {
 
 function patientCounts(p) {
   let done = 0;
-  for (const e of p.events) if (S.reviews[e.event_key]) done++;
+  for (const e of p.events) if (S.reviews[eventReviewKey(e)]) done++;
   return [done, p.events.length];
 }
 
@@ -244,7 +261,10 @@ function selectPatient(mrn) {
 }
 
 function fieldValue(ev, name) {
-  const r = S.reviews[ev.event_key];
+  const r = S.reviews[eventReviewKey(ev)];
+  if (isAdjudicationPackage() && r && r.adjudicated_fields && name in r.adjudicated_fields) {
+    return r.adjudicated_fields[name];
+  }
   if (r && r.edits && name in r.edits) return r.edits[name];
   return ev.fields ? ev.fields[name] : undefined;
 }
@@ -257,7 +277,7 @@ function renderMain() {
     main.innerHTML = '<div class="empty">Select a patient.</div>';
     return;
   }
-  main.appendChild(renderAddEntityBar(p));
+  if (!isAdjudicationPackage()) main.appendChild(renderAddEntityBar(p));
   for (const ev of p.events) main.appendChild(renderCard(p, ev));
 }
 
@@ -342,12 +362,13 @@ function removeUnsavedNewEntity(eventKey) {
 }
 
 function renderCard(p, ev) {
+  if (isAdjudicationPackage()) return renderAdjudicationCard(p, ev);
   const spec = S.schema[ev.event_type] || { label: ev.event_type, fields: [] };
-  const review = S.reviews[ev.event_key];
+  const review = S.reviews[eventReviewKey(ev)];
   const verdict = review ? review.verdict : "pending";
   const card = document.createElement("div");
   card.className = "card" + (verdict !== "pending" ? " " + verdict : "");
-  card.dataset.key = ev.event_key;
+  card.dataset.key = eventReviewKey(ev);
 
   const note = (p.notes || {})[ev.note_id] || {};
   const quotes = gatherEvidence(ev); // evidence + review_anchor snippets
@@ -439,6 +460,180 @@ function renderCard(p, ev) {
   row.appendChild(approve);
   row.appendChild(reject);
   row.appendChild(cmt);
+  card.appendChild(row);
+  return card;
+}
+
+function sideLabel(side) {
+  const input = S.data && S.data.inputs && S.data.inputs[side];
+  return (input && input.label) || side;
+}
+
+function sideFields(ev, side) {
+  const item = ev && ev[side];
+  return item && item.fields ? item.fields : null;
+}
+
+function displayValue(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (Array.isArray(v)) return v.length ? v.map(displayValue).join("; ") : "—";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function adjudicationInitialFields(ev) {
+  const key = eventReviewKey(ev);
+  const review = S.reviews[key];
+  if (review && review.adjudicated_fields) return { ...review.adjudicated_fields };
+  return { ...(sideFields(ev, "left") || sideFields(ev, "right") || {}) };
+}
+
+function gatherAdjudicationEvidence(ev) {
+  const out = [];
+  ["left", "right"].forEach((side) => {
+    const fields = sideFields(ev, side);
+    if (!fields) return;
+    out.push(...evidenceItems(fields.evidence));
+    out.push(...evidenceItems(fields.review_anchor));
+  });
+  return out;
+}
+
+function renderSidePanel(ev, side, spec) {
+  const panel = document.createElement("div");
+  panel.className = "sidepanel" + (sideFields(ev, side) ? "" : " missing");
+  const title = document.createElement("div");
+  title.className = "sidetitle";
+  title.textContent = sideLabel(side);
+  panel.appendChild(title);
+  const fields = sideFields(ev, side);
+  if (!fields) {
+    const miss = document.createElement("div");
+    miss.className = "sideempty";
+    miss.textContent = "missing";
+    panel.appendChild(miss);
+    return panel;
+  }
+  const comparisonFields = new Set((spec && spec.comparison_fields) || []);
+  const dl = document.createElement("dl");
+  for (const f of spec.fields || []) {
+    const row = document.createElement("div");
+    row.className = "siderow" + (comparisonFields.has(f.name) ? " compared" : "");
+    const dt = document.createElement("dt");
+    dt.textContent = f.label;
+    const dd = document.createElement("dd");
+    dd.textContent = displayValue(fields[f.name]);
+    row.append(dt, dd);
+    dl.appendChild(row);
+  }
+  panel.appendChild(dl);
+  return panel;
+}
+
+function renderAdjudicationCard(p, ev) {
+  const spec = S.schema[ev.event_type] || { label: ev.event_type, fields: [] };
+  const review = S.reviews[eventReviewKey(ev)];
+  const decision = review ? review.decision || "custom" : "pending";
+  const doneClass =
+    decision === "pending" ? "" : decision === "exclude" ? " rejected" : " approved";
+  const card = document.createElement("div");
+  card.className = "card adjudication" + doneClass;
+  card.dataset.key = eventReviewKey(ev);
+
+  const note = (p.notes || {})[ev.note_id] || {};
+  const quotes = gatherAdjudicationEvidence(ev);
+
+  const head = document.createElement("div");
+  head.className = "chead";
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = spec.label + " · " + (ev.status || "disagreement");
+  head.appendChild(badge);
+  const ids = document.createElement("span");
+  ids.className = "ids";
+  ids.appendChild(makeCopyChip("MRN", p.mrn));
+  if (ev.note_id) ids.appendChild(makeCopyChip("Note ID", ev.note_id));
+  if (note.note_date) ids.appendChild(makeCopyChip("Date", note.note_date));
+  head.appendChild(ids);
+  const pill = document.createElement("span");
+  pill.className =
+    "pill " +
+    (decision === "pending" ? "pending" : decision === "exclude" ? "rejected" : "approved");
+  pill.textContent = decision;
+  head.appendChild(pill);
+  card.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "cbody";
+  const left = document.createElement("div");
+  left.className = "col";
+  const evN = quotes.length;
+  left.innerHTML =
+    "<h4>Source note" +
+    (evN
+      ? ' <span class="muted">· ' +
+        evN +
+        " evidence span" +
+        (evN === 1 ? "" : "s") +
+        " highlighted</span>"
+      : "") +
+    "</h4>" +
+    '<div class="notemeta">' +
+    escapeHtml([note.note_type, note.department].filter(Boolean).join(" · ")) +
+    "</div>" +
+    '<div class="note">' +
+    buildHighlightedNote(note.note_text || "", quotes) +
+    "</div>";
+  body.appendChild(left);
+
+  const right = document.createElement("div");
+  right.className = "col";
+  right.innerHTML = "<h4>Model outputs</h4>";
+  const compare = document.createElement("div");
+  compare.className = "comparegrid";
+  compare.append(renderSidePanel(ev, "left", spec), renderSidePanel(ev, "right", spec));
+  right.appendChild(compare);
+  const editorTitle = document.createElement("h4");
+  editorTitle.textContent = "Adjudicated fields";
+  right.appendChild(editorTitle);
+  const editEv = {
+    event_key: eventReviewKey(ev),
+    fields: adjudicationInitialFields(ev),
+  };
+  for (const f of spec.fields) right.appendChild(renderField(editEv, f));
+  body.appendChild(right);
+  card.appendChild(body);
+
+  const row = document.createElement("div");
+  row.className = "approw";
+  const cmt = document.createElement("input");
+  cmt.type = "text";
+  cmt.className = "cmt";
+  cmt.placeholder = "adjudicator comment (optional)";
+  cmt.value = review ? review.comment || "" : "";
+
+  const useLeft = document.createElement("button");
+  useLeft.className = "ok";
+  useLeft.textContent = "Use " + sideLabel("left");
+  useLeft.disabled = !sideFields(ev, "left");
+  useLeft.onclick = () => saveAdjudicationDecision(card, ev, "left", cmt.value);
+
+  const useRight = document.createElement("button");
+  useRight.className = "ok";
+  useRight.textContent = "Use " + sideLabel("right");
+  useRight.disabled = !sideFields(ev, "right");
+  useRight.onclick = () => saveAdjudicationDecision(card, ev, "right", cmt.value);
+
+  const custom = document.createElement("button");
+  custom.textContent = "Save custom";
+  custom.onclick = () => saveAdjudicationDecision(card, ev, "custom", cmt.value);
+
+  const exclude = document.createElement("button");
+  exclude.className = "no";
+  exclude.textContent = "Exclude";
+  exclude.onclick = () => saveAdjudicationDecision(card, ev, "exclude", cmt.value);
+
+  row.append(useLeft, useRight, custom, exclude, cmt);
   card.appendChild(row);
   return card;
 }
@@ -650,6 +845,33 @@ function collectEdits(card, ev) {
   return edits;
 }
 
+function valueFromFieldWrap(wrap) {
+  const kind = wrap._kind;
+  const ins = wrap._inputs || [];
+  if (kind === "approx_date") {
+    const date = ins[0].value.trim() || null;
+    const prec = Number(ins[1].value);
+    const anchor = ins[2] && ins[2].value ? ins[2].value : null;
+    const v = { date: date, precision: prec };
+    if (anchor !== null) v.anchor = anchor;
+    return v;
+  }
+  if (kind === "bool") return ins[0].checked;
+  if (kind === "number") return ins[0].value === "" ? null : Number(ins[0].value);
+  if (kind === "readonly") return undefined;
+  return ins[0].value;
+}
+
+function collectFieldValues(card, baseFields) {
+  const fields = { ...(baseFields || {}) };
+  card.querySelectorAll(".fld").forEach((wrap) => {
+    const name = wrap.dataset.name;
+    const value = valueFromFieldWrap(wrap);
+    if (value !== undefined) fields[name] = value;
+  });
+  return fields;
+}
+
 async function saveVerdict(card, ev, verdict, comment) {
   // Don't persist malformed dates — make the reviewer fix them first.
   let bad = false;
@@ -685,8 +907,62 @@ async function saveVerdict(card, ev, verdict, comment) {
     alert("Save failed: " + (res.error || "unknown"));
     return;
   }
-  S.reviews[ev.event_key] = review;
+  S.reviews[eventReviewKey(ev)] = review;
   // re-render just this card in place
+  const fresh = renderCard(S.byMrn[S.sel], ev);
+  card.replaceWith(fresh);
+  renderSidebar();
+  updateProgress();
+}
+
+async function saveAdjudicationDecision(card, ev, decision, comment) {
+  let bad = false;
+  card.querySelectorAll(".fld").forEach((wrap) => {
+    if (wrap._kind === "approx_date" && wrap._validate && !wrap._validate()) bad = true;
+  });
+  if (bad) {
+    alert(
+      "Please fix the highlighted date(s) first — use YYYY-MM-DD (set precision for approximate dates)."
+    );
+    return;
+  }
+
+  let fields = null;
+  let selectedSide = null;
+  if (decision === "left" || decision === "right") {
+    selectedSide = decision;
+    fields = { ...(sideFields(ev, decision) || {}) };
+  } else if (decision === "custom") {
+    selectedSide = "custom";
+    fields = collectFieldValues(card, adjudicationInitialFields(ev));
+  }
+
+  const review = {
+    adjudication_key: eventReviewKey(ev),
+    event_key: ev.event_key,
+    mrn: S.sel,
+    event_type: ev.event_type,
+    note_id: ev.note_id,
+    status: ev.status || "",
+    decision: decision,
+    selected_side: selectedSide,
+    comment: comment || "",
+    reviewer: document.getElementById("reviewer").value || "",
+    reviewed_at: new Date().toISOString(),
+  };
+  if (fields !== null) review.adjudicated_fields = fields;
+
+  const r = await fetch("/api/review", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(review),
+  });
+  const res = await r.json();
+  if (!res.ok) {
+    alert("Save failed: " + (res.error || "unknown"));
+    return;
+  }
+  S.reviews[eventReviewKey(ev)] = review;
   const fresh = renderCard(S.byMrn[S.sel], ev);
   card.replaceWith(fresh);
   renderSidebar();

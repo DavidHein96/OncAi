@@ -224,8 +224,35 @@ inbox/fc_adjudications/ihc_compare_v1/ihc_compare_v1.adjudication_pkg.json
 The package contains only slots where the two batches disagree or one side is
 missing a matching event. Matching uses the definition's
 `event_identity_fields` to align events and `comparison_fields` to decide which
-values count as disagreements. The human adjudication log and
-`extractions_adjudicated.<round>` loader are the next implementation slice.
+values count as disagreements.
+
+Open the package in the same review app:
+
+```bash
+python apps/review_app/server.py \
+    --package inbox/fc_adjudications/ihc_compare_v1/ihc_compare_v1.adjudication_pkg.json \
+    --reviewer "Reviewer Name"
+```
+
+The app writes:
+
+```text
+inbox/fc_adjudications/ihc_compare_v1/ihc_compare_v1.adjudications.jsonl
+```
+
+Each adjudication decision chooses the left output, the right output, a custom
+edited value, or exclusion. Once every disputed item has a decision:
+
+```bash
+oncai ingest fc_adjudications
+oncai db update fc_adjudications
+```
+
+The adjudicated rows are queryable as:
+
+```sql
+SELECT * FROM extractions_adjudicated.ihc_compare_v1;
+```
 
 ## Review Package Shape
 

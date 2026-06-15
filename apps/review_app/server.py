@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Local physician review server for FC extraction outputs — standard library only.
 
-Reads a ``*.review_pkg.json`` produced by ``oncai.review.package`` and serves a
-localhost web UI for adjudicating extracted events (approve / reject / edit
-fields), writing verdicts to a ``*.reviews.jsonl`` sidecar.
+Reads a ``*.review_pkg.json`` produced by ``oncai.review.package`` or a
+``*.adjudication_pkg.json`` produced by ``oncai adjudication create`` and serves
+a localhost web UI for human review/adjudication, writing append-only JSONL
+sidecars beside the package.
 
 This module imports nothing outside the Python standard library so it can be
 frozen into a single shareable executable:
@@ -12,10 +13,9 @@ frozen into a single shareable executable:
     # (bundles web/ via --add-data)
 
 A collaborator then just runs ``oncai-review`` (no Python, DuckDB, or data lake)
-and opens a ``*.review_pkg.json`` from the in-app file picker; verdicts are saved
-under ``~/Documents/oncai_reviews/<batch>.reviews.jsonl``. Passing ``--package``
-opens one immediately instead (the ``oncai fc review`` path), saving the reviews
-next to the package.
+and opens a package from the in-app file picker; logs are saved under
+``~/Documents/oncai_reviews/``. Passing ``--package`` opens one immediately
+instead, saving the log next to the package.
 
 Web assets (index.html / style.css / app.js) live in the sibling ``web/`` dir.
 """
@@ -98,14 +98,20 @@ _ANCHORS = {None, "BOM", "EOM", "BOY", "EOY", "MID", "EXACT"}
 
 
 def _validate_review(review: dict) -> str | None:
-    """Return an error message if an edited ApproxDate is malformed, else None.
+    """Return an error message if an ApproxDate edit/final field is malformed.
 
     Authoritative guard so bad data can't be persisted even if the browser
-    validation is bypassed. Checks edited ApproxDate values ({"date": ...}):
-    the date must be a real calendar date in YYYY-MM-DD (or null = unknown),
-    and the anchor must be one of the allowed hints.
+    validation is bypassed. Checks review ``edits`` and adjudication
+    ``adjudicated_fields`` values ({"date": ...}): the date must be a real
+    calendar date in YYYY-MM-DD (or null = unknown), and the anchor must be one
+    of the allowed hints.
     """
-    for field, value in (review.get("edits") or {}).items():
+    values: dict = {}
+    for key in ("edits", "adjudicated_fields"):
+        block = review.get(key) or {}
+        if isinstance(block, dict):
+            values.update(block)
+    for field, value in values.items():
         if not (isinstance(value, dict) and "date" in value):
             continue
         date = value.get("date")
@@ -125,6 +131,20 @@ def _validate_review(review: dict) -> str | None:
     return None
 
 
+def _valid_package(package: object) -> bool:
+    """True for either supported immutable package shape."""
+    if not isinstance(package, dict):
+        return False
+    if "patients" not in package or "field_schema" not in package:
+        return False
+    package_type = _package_type(package)
+    if package_type == "review":
+        return "batch" in package
+    if package_type == "adjudication":
+        return "round" in package and "inputs" in package
+    return False
+
+
 class ReviewState:
     """Loaded package + the verdicts written so far. Guarded by a lock."""
 
@@ -142,7 +162,7 @@ class ReviewState:
         return cls(json.loads(Path(package_path).read_text()), reviews_path, reviewer)
 
     def _load_existing_reviews(self) -> None:
-        """Replay the append-only reviews log; last write per event_key wins."""
+        """Replay the append-only log; last write per package item wins."""
         if not self.reviews_path.exists():
             return
         for raw_line in self.reviews_path.read_text().splitlines():
@@ -153,7 +173,7 @@ class ReviewState:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            key = rec.get("event_key")
+            key = _record_key(rec)
             if key:
                 self.reviews[key] = rec
 
@@ -161,8 +181,11 @@ class ReviewState:
         with self.lock:
             return {
                 "loaded": True,
+                "package_type": _package_type(self.package),
                 "definition_name": self.package.get("definition_name"),
                 "batch": self.package.get("batch"),
+                "round": self.package.get("round"),
+                "inputs": self.package.get("inputs"),
                 "generated_at": self.package.get("generated_at"),
                 "field_schema": self.package.get("field_schema", {}),
                 "patients": _patients_with_reviewer_added_events(
@@ -175,9 +198,9 @@ class ReviewState:
 
     def save_review(self, review: dict) -> dict:
         """Append a verdict to the log and update memory. Returns it normalized."""
-        key = review.get("event_key")
+        key = _record_key(review)
         if not key:
-            raise ValueError("review is missing event_key")
+            raise ValueError("record is missing event_key/adjudication_key")
         err = _validate_review(review)
         if err:
             raise ValueError(err)
@@ -197,6 +220,28 @@ def _is_reviewer_added_event(review: dict) -> bool:
     return review.get("is_new_event") is True
 
 
+def _package_type(package: dict) -> str:
+    """Return the package mode; old review packages have no explicit type."""
+    return str(package.get("package_type") or "review")
+
+
+def _record_key(record: dict) -> str:
+    """Stable key for either review verdicts or adjudication decisions."""
+    return str(record.get("adjudication_key") or record.get("event_key") or "")
+
+
+def _package_name(package: dict) -> str:
+    if _package_type(package) == "adjudication":
+        return _safe_name(str(package.get("round") or "adjudication"))
+    return _safe_name(str(package.get("batch") or "review"))
+
+
+def _log_suffix_for_package(package: dict) -> str:
+    if _package_type(package) == "adjudication":
+        return ".adjudications.jsonl"
+    return ".reviews.jsonl"
+
+
 def _patients_with_reviewer_added_events(
     package: dict,
     reviews: dict[str, dict],
@@ -209,6 +254,8 @@ def _patients_with_reviewer_added_events(
     """
     raw_patients = package.get("patients", [])
     patients = copy.deepcopy(raw_patients) if isinstance(raw_patients, list) else []
+    if _package_type(package) == "adjudication":
+        return patients
     known_keys = {
         str(event.get("event_key") or "")
         for patient in patients
@@ -328,27 +375,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain")
 
     def _handle_load(self, raw: bytes) -> None:
-        """Open a review package uploaded from the browser file picker."""
+        """Open a review/adjudication package uploaded from the file picker."""
         global STATE  # noqa: PLW0603 — module-level singleton is intentional for this local single-user server
         try:
             package = json.loads(raw)
         except json.JSONDecodeError as exc:
             self._send_json({"ok": False, "error": f"Not valid JSON: {exc}"}, code=400)
             return
-        if not isinstance(package, dict) or "patients" not in package or "field_schema" not in package:
+        if not _valid_package(package):
             self._send_json(
                 {
                     "ok": False,
-                    "error": "That file isn't a review package. Build one with "
-                    "`oncai fc review-package <batch>` and open the .review_pkg.json it writes.",
+                    "error": "That file isn't a review/adjudication package. Open a "
+                    ".review_pkg.json from `oncai fc review-package` or a "
+                    ".adjudication_pkg.json from `oncai adjudication create`.",
                 },
                 code=400,
             )
             return
-        batch = _safe_name(str(package.get("batch") or "review"))
-        reviews_path = SAVE_DIR / f"{batch}.reviews.jsonl"
+        package_name = _package_name(package)
+        reviews_path = SAVE_DIR / f"{package_name}{_log_suffix_for_package(package)}"
         STATE = ReviewState(package, reviews_path, DEFAULT_REVIEWER)
-        print(f"Opened package (batch '{batch}') — reviews -> {reviews_path}")
+        print(f"Opened package ('{package_name}') — log -> {reviews_path}")
         self._send_json(STATE.data_payload())
 
     def _handle_review(self, raw: bytes) -> None:
@@ -444,6 +492,10 @@ def default_reviews_path(package_path: Path) -> Path:
     name = package_path.name
     if name.endswith(".review_pkg.json"):
         return package_path.with_name(name[: -len(".review_pkg.json")] + ".reviews.jsonl")
+    if name.endswith(".adjudication_pkg.json"):
+        return package_path.with_name(
+            name[: -len(".adjudication_pkg.json")] + ".adjudications.jsonl"
+        )
     return package_path.with_name(package_path.stem + ".reviews.jsonl")
 
 
@@ -499,8 +551,8 @@ def serve(  # noqa: PLR0913 — these are all explicit CLI-facing options, kept 
         print(f"  reviews : {STATE.reviews_path}")
         print(f"  patients: {len(STATE.package.get('patients', []))}   events: {n_events}")
     else:
-        print("  no package opened — pick a .review_pkg.json in the browser")
-        print(f"  reviews will be saved under: {SAVE_DIR}")
+        print("  no package opened — pick a .review_pkg.json or .adjudication_pkg.json")
+        print(f"  logs will be saved under: {SAVE_DIR}")
     print("  Quit from the button in the app, or Ctrl-C here.")
     if open_browser:
         threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()

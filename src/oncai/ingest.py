@@ -567,17 +567,20 @@ def _ingest_fc_adjudications(
     dry_run: bool = False,
     forgotten_targets: set[str] | None = None,
 ) -> FolderResult:
-    """fc_adjudications: v1 package/log folder placeholder.
+    """fc_adjudications: pair adjudication packages with decision logs.
 
-    Package creation lands ``<round>.adjudication_pkg.json`` plus an
-    ``adjudication.json`` descriptor here. The human log and parquet loader come
-    in the next slice; for now ingest sidecars the canonical package artifacts
-    and reports rounds that are not yet ready to project.
+    Drop ``<round>.adjudication_pkg.json`` + ``<round>.adjudications.jsonl`` into
+    ``inbox/fc_adjudications/<round>/``. A completed log projects to
+    ``lake/fc_adjudications/<round>.parquet`` → ``extractions_adjudicated.<round>``.
+    Incomplete or invalid rounds fail themselves; package-only rounds are
+    sidecarred and skipped until a decision log appears.
     """
     from oncai.adjudication import (
         ADJUDICATION_DESCRIPTOR,
         ADJUDICATION_LOG_SUFFIX,
         ADJUDICATION_PACKAGE_SUFFIX,
+        adjudication_round_name,
+        adjudication_to_df,
     )
 
     folder = "fc_adjudications"
@@ -600,18 +603,57 @@ def _ingest_fc_adjudications(
             files.append(descriptor)
         _ensure_sidecars(files)
 
-        if package_files and not log_files:
+        if not package_files:
+            result.notes.append(
+                f"{round_name}: missing *{ADJUDICATION_PACKAGE_SUFFIX}"
+            )
+            continue
+        if not log_files:
             result.notes.append(
                 f"{round_name}: adjudication package exists; "
                 f"waiting for *{ADJUDICATION_LOG_SUFFIX}"
             )
-        elif not package_files:
-            result.notes.append(
-                f"{round_name}: missing *{ADJUDICATION_PACKAGE_SUFFIX}"
+            continue
+
+        packages = {adjudication_round_name(p): p for p in package_files}
+        logs = {adjudication_round_name(p): p for p in log_files}
+        package_path = packages.get(round_name) or package_files[0]
+        log_path = logs.get(round_name) or log_files[0]
+        try:
+            load_result = adjudication_to_df(package_path, log_path)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "Could not build adjudicated table for some round(s) — finish "
+                "or remove incomplete/invalid adjudication log(s):\n  "
+                f"{package_path.name}: {exc}"
+            ) from exc
+        if load_result.df is None:
+            continue
+
+        out = config.lake_path / folder / f"{round_name}.parquet"
+        result.deltas.append(_compute_lake_delta(round_name, load_result.df, out))
+        if not dry_run:
+            _atomic_write_parquet(load_result.df, out)
+            result.row_count += load_result.written
+            result.written_paths.append(out)
+
+        result.files.append(
+            FileStats(
+                name=round_name,
+                new_rows=load_result.written,
+                updated_rows=0,
+                unchanged_rows=load_result.excluded_events,
             )
-        else:
+        )
+        if load_result.excluded_events:
             result.notes.append(
-                f"{round_name}: adjudication log detected; loader not implemented yet"
+                f"{round_name}: excluded {load_result.excluded_events} "
+                "adjudication item(s)"
+            )
+        if load_result.ignored_adjudications:
+            result.notes.append(
+                f"{round_name}: ignored {load_result.ignored_adjudications} "
+                "adjudication record(s) with no matching package item"
             )
     return result
 
