@@ -1,0 +1,18 @@
+{
+  "name": "oncai-review",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dev tooling for the oncai-review front end (the app itself ships dependency-free).",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "test": "node --test \"web/*.test.js\"",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0"
+  }
+}

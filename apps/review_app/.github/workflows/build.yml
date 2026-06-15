@@ -1,0 +1,99 @@
+name: Build standalone executables
+
+# Builds a single-file executable for each platform. Runs on demand (Actions
+# tab → Run workflow) and automatically when a GitHub Release is created — in
+# which case the per-platform binaries are attached to that release.
+#
+# Artifacts and release assets are named with the semantic version read from
+# pyproject.toml (the single source of truth), e.g. oncai-review-0.3.0-linux-x64.
+#
+# macOS ships a double-clickable .app bundle (built with --windowed) zipped with
+# ditto so the bundle structure and permissions survive download. See
+# docs/RUNNING-ON-MAC.md for the (unsigned) first-launch steps reviewers follow.
+on:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    # Needed so the release-asset upload can write to the release.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            data: "web;web" # PyInstaller uses ';' as the path separator on Windows
+            meta: "pyproject.toml;." # bundle pyproject so the exe can report its version
+            iconflag: "--icon assets/icon.ico" # taskbar / Explorer icon
+            binary: oncai-review.exe # what PyInstaller writes into dist/
+            ext: ".exe" # release-asset extension (raw binary)
+          - os: ubuntu-latest
+            label: linux-x64
+            data: "web:web" # ...and ':' everywhere else
+            meta: "pyproject.toml:."
+            iconflag: "" # ELF binaries carry no icon
+            binary: oncai-review
+            ext: ""
+          - os: macos-latest
+            label: macos-arm64 # macos-latest runners are Apple Silicon (arm64)
+            data: "web:web"
+            meta: "pyproject.toml:."
+            iconflag: "--icon assets/icon.icns"
+            binary: oncai-review # console binary; wrapped into a .app in "Package asset"
+            ext: ".zip" # double-clickable .app, zipped for distribution
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read version from pyproject.toml
+        id: ver
+        shell: bash
+        run: |
+          v=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: Build EXE
+        run: pyinstaller --onefile ${{ matrix.iconflag }} --name oncai-review --add-data "${{ matrix.data }}" --add-data "${{ matrix.meta }}" server.py
+
+      - name: Package asset
+        id: pkg
+        shell: bash
+        # Name every asset with the semantic version + platform. macOS wraps the
+        # console binary in a double-clickable .app (opens in Terminal) and zips
+        # it with ditto (preserves structure + perms); the other platforms ship
+        # the raw binary as-is.
+        run: |
+          asset="oncai-review-${{ steps.ver.outputs.version }}-${{ matrix.label }}${{ matrix.ext }}"
+          if [ "${{ matrix.ext }}" = ".zip" ]; then
+            bash scripts/build-macos-app.sh "dist/${{ matrix.binary }}" assets/icon.icns "${{ steps.ver.outputs.version }}" dist
+            ditto -c -k --keepParent dist/oncai-review.app "$asset"
+          else
+            cp "dist/${{ matrix.binary }}" "$asset"
+          fi
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oncai-review-${{ steps.ver.outputs.version }}-${{ matrix.label }}
+          path: ${{ steps.pkg.outputs.asset }}
+
+      - name: Attach binary to the release
+        if: github.event_name == 'release'
+        shell: bash
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ steps.pkg.outputs.asset }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

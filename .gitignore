@@ -1,0 +1,62 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Coverage & test artifacts
+.coverage
+coverage.*
+*.coverprofile
+htmlcov/
+.hypothesis/
+
+
+# Jupyter
+.ipynb_checkpoints/
+testing.ipynb
+*.ipynb
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.local
+!.env.example
+!.env.test
+.pypirc
+
+# MkDocs build output
+site/
+
+# Virtual environments
+.venv
+
+# Data files
+*.csv
+!tests/fixtures/sample_pathology.csv
+*.parquet
+*.jsonl
+*.duckdb
+*.xlsx
+*.sha256
+*.zip
+*.bak
+*.log
+
+# Project-specific ignores
+*_manifest.json
+oncai.yaml
+TODO
+review_app_reference
+*.review_pkg.json

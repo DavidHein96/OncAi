@@ -1,0 +1,203 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oncai"
+version = "0.2.0"
+description = "Oncology data lake and single-note LLM extraction toolkit"
+readme = "README.md"
+license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "License :: Free For Educational Use",
+    "License :: Free for non-commercial use",
+]
+authors = [{ name = "David Hein", email = "davidhein67@gmail.com" }]
+maintainers = [{ name = "David Hein" }]
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.0.0",
+    "openai>=1.66.0",
+    "polars>=1.0.0",
+    "pydantic>=2.7.0",
+    "python-dateutil>=2.8.2",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "tqdm>=4.64.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.14.10",
+    "ty>=0.0.8",
+]
+figs = [
+    "matplotlib>=3.7.0",
+    "reportlab>=4.0.0",
+    "seaborn>=0.12.0",
+]
+
+[project.scripts]
+oncai = "oncai.cli:main"
+
+
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+
+extend-exclude = [
+    "*.ipynb",
+    "tests",
+]
+
+[tool.ruff.lint]
+# Documentation for selected linting rules:
+# Ruff combines many linters into one. Below, we select the specific rule sets
+# that Ruff will enforce. Each set addresses different aspects of code quality
+# and potential issues.
+#
+# Rule sets explained:
+#   - E (Pyflakes errors): Common Python programming errors.
+#   - F (Pyflakes F-strings): Issues specific to f-strings.
+#   - I (Isort): Checks for correctly sorted imports.
+#   - B (Bugbear): Catches common design flaws and potential bugs.
+#   - UP (Pyupgrade): Suggests modern Python syntax (e.g., f-strings over .format()).
+#   - SIM (Simpler): Identifies opportunities to simplify code.
+#   - PL (Pylint): General code quality and style checks.
+#   - N (Pep8 Naming): Enforces PEP8 naming conventions.
+#   - RUF (Ruff-specific rules): Rules implemented directly by Ruff.
+#   - W (Flake8 Warnings): General warnings about code style and potential issues.
+#   - S (Safety): Checks for security vulnerabilities in dependencies.
+#   - DOC (Docstrings): Checks for docstring presence and style.
+#   - C4 (flake 8 comprehensions): Issues with list/set/dict comprehensions.
+#   - ANN (flake8-annotations): Issues with type annotations.
+#   - ASYNC (flake8-async): Issues with async code.
+#   - BLE (flake8-blind-except): Catches blind except clauses.
+#   - INT (flake8-gettext): Issues with internationalization.
+#   - LOG (flake8-logging-format): Issues with logging format strings.
+#   - PIE (flake8-pie): Performance and readability issues.
+#   - PTH (flake8-pathlib): Recommendations for using pathlib over os.path.
+#   - PERF (perflint): Performance-related issues.
+#   - TRY (tryceratops): Issues with try-except blocks.
+#   - C90 (mccabe): Complexity issues (cyclomatic complexity > 10).
+
+# For a comprehensive list of rules and their explanations, refer to the
+# official Ruff documentation: https://docs.astral.sh/ruff/rules/
+
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "PL",
+    "N",
+    "RUF",
+    "W",
+    "S",
+    "C4",
+    "ANN",
+    "ASYNC",
+    "BLE",
+    "INT",
+    "LOG",
+    "PIE",
+    "PTH",
+    "PERF",
+    "TRY",
+    "C90",
+]
+ignore = [
+    "TRY003", # long lines in exception messages are fine
+    "RUF022", # We have __all__ unsorted so we can add in comments
+    "E501",   # makes line length non blocking
+    "S104",
+    "ANN401", # Sometimes the correct type is Any
+    "ANN",    # Existing codebase is not fully annotation-complete yet
+    "BLE001", # Broad exception handling is used around optional integrations
+    "C408",   # Dict constructor style is not release-significant
+    "C901",   # Complexity cleanup should be handled intentionally, not by lint churn
+    "E402",   # Some scripts intentionally patch sys.path or defer imports
+    "PERF401",
+    "PERF102",
+    "PLC0207",
+    "PLC0415", # Lazy imports keep optional ML dependencies out of CLI startup
+    "PLR",
+    "PLW2901",
+    "RUF002",
+    "RUF005",
+    "RUF046",
+    "RUF100",
+    "S311",   # random.uniform is used for retry-backoff jitter, not crypto
+    "SIM102",
+    "SIM110",
+    "UP017",
+    "UP037",
+
+]
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-branches = 12
+max-locals = 20
+max-returns = 8
+max-statements = 50
+max-public-methods = 25
+max-bool-expr = 5
+
+
+[tool.ruff.lint.per-file-ignores]
+# Test files use asserts (S101) and /tmp/ literals (S108) intentionally;
+# neither is a real concern in test contexts.
+"tests/**/*.py" = ["S101", "S108"]
+# Typer CLI commands declare parameters via `typer.Argument(...)` /
+# `typer.Option(...)` calls in defaults — that's the required idiom and
+# is read once at registration, not per-call. B008's mutable-default
+# concern doesn't apply.
+"src/oncai/cli/**/*.py" = ["B008"]
+# DuckDB cannot parameter-bind identifiers (batch / table / column names),
+# only literals — so identifier-based SQL must be string-interpolated. This
+# CLI runs locally against the user's own DuckDB; SQL-injection is not the
+# relevant threat model, and the batch name in fc_run_single is already
+# validated upstream via `_SAFE_BATCH_NAME`.
+"src/oncai/cli/fc_cmds.py" = ["B008", "S608"]
+# Same identifier-interpolation rationale as above: source_table / id_col /
+# text_col come from the caller and can't be parameter-bound in DuckDB.
+"src/oncai/fc_extraction/batch_single.py" = ["S608"]
+# Same identifier-interpolation rationale: the review note-loader builds its
+# SELECT from source_table / text_col / id_col / auto-detected display columns,
+# none of which DuckDB can parameter-bind. Reads the user's own local DuckDB.
+"src/oncai/review/notes.py" = ["S608"]
+# db.py is the lake → DuckDB builder. Schema/table names come from lake
+# folder + parquet stems and are double-quoted via the _q() helper before
+# interpolation; parquet paths and filter values are passed via `?` bind
+# parameters. The identifier-interpolation pattern is intentional.
+"src/oncai/db.py" = ["S608"]
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+# [tool.pytest.ini_options]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+# Tests are excluded for the same reasons ruff excludes them: most ty errors
+# in test code are union-narrowing noise (e.g. `pl.LazyFrame.collect()` ->
+# `InProcessQuery | DataFrame` where the runtime value is always DataFrame),
+# or assertions on Optional return values that the tests intentionally treat
+# as success-path. The actual correctness contract is enforced by pytest.
+exclude = ["tests/**"]

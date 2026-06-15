@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FC Extraction — Physician Review</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>FC Extraction — Physician Review</h1>
+      <span class="sub" id="ctx"></span>
+      <span class="sub savepath" id="savepath" title="" aria-label="reviews file"></span>
+      <div class="spacer"></div>
+      <span class="sub">Reviewer</span>
+      <input type="text" id="reviewer" style="width: 140px" placeholder="your name" />
+      <div class="bar"><span id="prog"></span></div>
+      <span class="sub" id="progtxt"></span>
+      <span class="sub ver" id="ver" title="app version"></span>
+      <button
+        id="changePkg"
+        class="switchbtn"
+        style="display: none"
+        title="Close this package and open another"
+      >
+        Change Package
+      </button>
+      <button id="quit" class="quitbtn" title="Stop the review server and close the app">
+        Quit
+      </button>
+    </header>
+    <section id="picker" class="picker" style="display: none">
+      <div class="pcard">
+        <h2>Open a review package</h2>
+        <p>Select a <code>.review_pkg.json</code> file to start reviewing.</p>
+        <input type="file" id="pkgfile" accept=".json,application/json" />
+        <div id="pkgerr" class="pkgerr"></div>
+        <p class="hint">
+          No package yet? Build one with <code>oncai fc review-package &lt;batch&gt;</code>, then
+          open the <code>.review_pkg.json</code> it writes.
+        </p>
+      </div>
+    </section>
+    <div class="layout" id="layout" style="display: none">
+      <aside id="sidebar"></aside>
+      <main id="main"><div class="empty">Loading…</div></main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
