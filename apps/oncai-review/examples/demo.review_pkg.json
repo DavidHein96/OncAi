@@ -1,0 +1,147 @@
+{
+  "definition_name": "Renal Cell Carcinoma — Diagnosis & Biomarkers",
+  "batch": "demo-rcc",
+  "generated_at": "2026-06-05T00:00:00Z",
+  "field_schema": {
+    "diagnosis": {
+      "label": "Diagnosis",
+      "fields": [
+        {
+          "name": "histology",
+          "label": "Histology",
+          "control": "enum",
+          "required": true,
+          "options": ["clear cell RCC", "papillary RCC", "chromophobe RCC", "other"]
+        },
+        {
+          "name": "grade",
+          "label": "ISUP/WHO grade",
+          "control": "enum",
+          "required": false,
+          "options": ["", "1", "2", "3", "4"]
+        },
+        {
+          "name": "diagnosis_date",
+          "label": "Date of diagnosis",
+          "control": "approx_date",
+          "required": false,
+          "description": "Date the diagnosis was established on this note."
+        },
+        {
+          "name": "evidence",
+          "label": "Supporting evidence",
+          "control": "evidence_verbatim",
+          "required": true
+        }
+      ]
+    },
+    "biomarker": {
+      "label": "Biomarker",
+      "fields": [
+        {
+          "name": "marker",
+          "label": "Marker",
+          "control": "enum",
+          "required": true,
+          "options": ["BAP1", "CAIX", "CK7", "PBRM1", "other"]
+        },
+        {
+          "name": "result",
+          "label": "Result",
+          "control": "enum",
+          "required": true,
+          "options": ["positive", "negative", "retained", "lost", "equivocal"]
+        },
+        {
+          "name": "evidence",
+          "label": "Supporting evidence",
+          "control": "evidence_verbatim",
+          "required": true
+        }
+      ]
+    }
+  },
+  "patients": [
+    {
+      "mrn": "DEMO-0001",
+      "notes": {
+        "N-1001": {
+          "note_type": "Surgical Pathology",
+          "department": "Pathology",
+          "note_date": "2026-02-14",
+          "note_text": "FINAL PATHOLOGIC DIAGNOSIS\n\nLeft kidney, partial nephrectomy:\n  - Renal cell carcinoma, clear cell type.\n  - WHO/ISUP nucleolar grade 2 of 4.\n  - Tumor size 3.4 cm, confined to the kidney; margins negative.\n\nIMMUNOHISTOCHEMISTRY\n  CAIX: diffusely positive in tumor cells, supporting clear cell histology.\n  CK7: negative in the tumor.\n  BAP1: nuclear expression retained.\n\nCOMMENT\n  Findings are those of a clear cell renal cell carcinoma. The retained BAP1\n  staining is associated with a more favorable prognostic group."
+        }
+      },
+      "events": [
+        {
+          "event_key": "DEMO-0001:N-1001:dx1",
+          "event_type": "diagnosis",
+          "note_id": "N-1001",
+          "fields": {
+            "histology": "clear cell RCC",
+            "grade": "2",
+            "diagnosis_date": { "date": "2026-02-14", "precision": 3 },
+            "evidence": [
+              "Renal cell carcinoma, clear cell type.",
+              "WHO/ISUP nucleolar grade 2 of 4."
+            ]
+          }
+        },
+        {
+          "event_key": "DEMO-0001:N-1001:bm1",
+          "event_type": "biomarker",
+          "note_id": "N-1001",
+          "fields": {
+            "marker": "CAIX",
+            "result": "positive",
+            "evidence": ["CAIX: diffusely positive in tumor cells"]
+          }
+        },
+        {
+          "event_key": "DEMO-0001:N-1001:bm2",
+          "event_type": "biomarker",
+          "note_id": "N-1001",
+          "fields": {
+            "marker": "BAP1",
+            "result": "retained",
+            "evidence": ["BAP1: nuclear expression retained."]
+          }
+        }
+      ]
+    },
+    {
+      "mrn": "DEMO-0002",
+      "notes": {
+        "N-2002": {
+          "note_type": "Surgical Pathology",
+          "department": "Pathology",
+          "note_date": "2026-03-09",
+          "note_text": "FINAL PATHOLOGIC DIAGNOSIS\n\nRight kidney, radical nephrectomy:\n  - Papillary renal cell carcinoma, type 1.\n  - WHO/ISUP grade 2.\n\nIMMUNOHISTOCHEMISTRY\n  CK7: diffusely positive, consistent with papillary RCC.\n  CAIX: only focal, cup-like staining.\n\nCOMMENT\n  The morphology and CK7-positive immunoprofile support a papillary\n  renal cell carcinoma rather than a clear cell tumor."
+        }
+      },
+      "events": [
+        {
+          "event_key": "DEMO-0002:N-2002:dx1",
+          "event_type": "diagnosis",
+          "note_id": "N-2002",
+          "fields": {
+            "histology": "papillary RCC",
+            "grade": "2",
+            "diagnosis_date": { "date": "2026-03-01", "precision": 2 },
+            "evidence": ["Papillary renal cell carcinoma, type 1."]
+          }
+        },
+        {
+          "event_key": "DEMO-0002:N-2002:bm1",
+          "event_type": "biomarker",
+          "note_id": "N-2002",
+          "fields": {
+            "marker": "CK7",
+            "result": "positive",
+            "evidence": ["CK7: diffusely positive, consistent with papillary RCC."]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -59,4 +59,7 @@ site/
 oncai.yaml
 TODO
 review_app_reference
+# Real review packages may carry PHI, so they stay ignored — but the synthetic
+# demo package is a shipped example + test fixture and must be tracked.
 *.review_pkg.json
+!apps/oncai-review/examples/demo.review_pkg.json
