@@ -134,7 +134,11 @@ def load_id_filter(csv_path: Path, id_col: str = "note_id") -> set[str]:
 
     col_map = {c.lower(): c for c in df.columns}
     match = next(
-        (col_map[c.lower()] for c in (id_col, "note_id", "report_id", "id") if c.lower() in col_map),
+        (
+            col_map[c.lower()]
+            for c in (id_col, "note_id", "report_id", "id")
+            if c.lower() in col_map
+        ),
         None,
     )
     if match is None:

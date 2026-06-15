@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-15
+
+### Added
+
+- **Adjudication mode.** The app now opens `*.adjudication_pkg.json` packages
+  (from `oncai adjudication create <round>`) alongside review packages. Each
+  disputed event shows the two model outputs — `left` and `right`, labelled from
+  the package's `inputs` — side by side, with the fields that drove the
+  disagreement highlighted, plus an editable **Adjudicated fields** form seeded
+  from one side. Four decisions per item: **Use <left>**, **Use <right>**, **Save
+  custom** (hand-edit the merged fields), or **Exclude**. Decisions are written to
+  an append-only `*.adjudications.jsonl` sidecar (`adjudication_key`, `decision`,
+  `selected_side`, optional `adjudicated_fields`, `comment`, `reviewer`,
+  `reviewed_at`) next to the package — or under
+  `~/Documents/oncai_reviews/<round>.adjudications.jsonl` when opened from the
+  file picker. Same evidence highlighting, server-side date validation, and
+  last-write-wins log semantics as review mode.
+- **Reviewer-added entities.** An "Add entity" bar lets a reviewer create a new
+  event of any schema type and attach it to one of the patient's notes — for
+  findings the model missed. Added events are stamped `is_new_event`, written to
+  the same reviews log, and rehydrated from it on reload, so they survive
+  refreshes and re-opens. Unsaved new entities can be removed before saving.
+- **Switch packages without restarting.** A **Change Package** button (backed by
+  a new `POST /api/unload`) closes the current package and returns to the file
+  picker in place — previously switching packages meant restarting the server. It
+  warns before discarding unapplied field edits or unsaved new entities; the
+  saved log is never touched.
+- **Log-path indicator** in the header showing where verdicts are being written
+  (click to copy the full path), so the reviewer can always find the output
+  sidecar — handy now that one running server can move between packages.
+- Test coverage for the new surface: adjudication log-path derivation,
+  `adjudication_key` replay/last-write-wins, adjudication date validation,
+  reviewer-added-event round-trips, and `/api/unload` clearing the package
+  without deleting the saved log.
+
+### Changed
+
+- `/api/data` now reports `package_type`, `round`, and `inputs` alongside the
+  existing review fields so the front end can render either mode; package
+  validation (`_valid_package`) accepts both the review and adjudication shapes.
+- README, DESIGN notes, and the in-app file picker updated to cover adjudication
+  packages and the `.adjudications.jsonl` output.
+
 ## [0.4.0] - 2026-06-05
 
 ### Added

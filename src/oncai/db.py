@@ -248,12 +248,13 @@ def update_database_folder(config: OncaiConfig, folder: str) -> FolderUpdate:
             )
             try:
                 con.execute(
-                    f"CREATE OR REPLACE TABLE {qname} AS "
-                    "SELECT * FROM read_parquet(?)",
+                    f"CREATE OR REPLACE TABLE {qname} AS SELECT * FROM read_parquet(?)",
                     [parquet_path_str],
                 )
                 result.updated[full_name] = _count_rows(con, qname)
-                _run_sibling_sql(con, lake_folder / f"{folder}.parquet", transform_errors)
+                _run_sibling_sql(
+                    con, lake_folder / f"{folder}.parquet", transform_errors
+                )
             except Exception as e:
                 print(f"Error creating table {full_name}: {e}")
     finally:
@@ -363,14 +364,15 @@ def build_database(
 
             try:
                 con.execute(
-                    f"CREATE OR REPLACE TABLE {qname} AS "
-                    "SELECT * FROM read_parquet(?)",
+                    f"CREATE OR REPLACE TABLE {qname} AS SELECT * FROM read_parquet(?)",
                     [parquet_path_str],
                 )
                 results[full_name] = _count_rows(con, qname)
                 # Per-folder transform: <folder>/<folder>.sql can introduce
                 # derived tables for the single-table folder.
-                _run_sibling_sql(con, lake_folder / f"{folder}.parquet", transform_errors)
+                _run_sibling_sql(
+                    con, lake_folder / f"{folder}.parquet", transform_errors
+                )
             except Exception as e:
                 print(f"Error creating table {full_name}: {e}")
 

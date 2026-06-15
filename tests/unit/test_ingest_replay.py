@@ -144,9 +144,7 @@ class TestAlreadyCleanReports:
         # The skip is surfaced to the user via notes.
         assert any("skipping collation" in n for n in r.notes)
 
-        df = pl.read_parquet(
-            oncai_config.lake_path / "pathology" / "pathology.parquet"
-        )
+        df = pl.read_parquet(oncai_config.lake_path / "pathology" / "pathology.parquet")
         a_text = df.filter(pl.col("report_id") == "A").row(0, named=True)["report_text"]
         # Preserved verbatim: double spaces not reflowed, nothing stripped.
         assert a_text == text

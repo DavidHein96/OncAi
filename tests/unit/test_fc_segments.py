@@ -132,9 +132,7 @@ class TestSegmentMerge:
 
     def test_failed_records_dropped(self, tmp_path):
         bd = tmp_path / "v1"
-        _write_segment(
-            bd, 1, [_record("R1", "x"), _record("R2", "y", success=False)]
-        )
+        _write_segment(bd, 1, [_record("R1", "x"), _record("R2", "y", success=False)])
         result = merge_segments_to_parquet(bd, tmp_path / "out.parquet", dry_run=True)
         assert result.df is not None
         assert result.df.height == 1
@@ -160,8 +158,7 @@ class TestIngestFcExtractions:
         _write_segment(bd, 2, [_record("R1", "NEW")])
         sql_path = bd / "mybatch.sql"
         sql_path.write_text(
-            "CREATE OR REPLACE TABLE extractions_transformed.mybatch AS "
-            "SELECT 1 AS n;"
+            "CREATE OR REPLACE TABLE extractions_transformed.mybatch AS SELECT 1 AS n;"
         )
 
         results = run_ingest(oncai_config, folder="fc_extractions")
@@ -178,8 +175,7 @@ class TestIngestFcExtractions:
         lake_sql = oncai_config.lake_path / "fc_extractions" / "mybatch.sql"
         assert lake_sql.read_text() == sql_path.read_text()
         assert any(
-            "mybatch/mybatch.sql: SQL transform mirrored to lake as mybatch.sql"
-            in note
+            "mybatch/mybatch.sql: SQL transform mirrored to lake as mybatch.sql" in note
             for note in results[0].notes
         )
 
@@ -187,8 +183,7 @@ class TestIngestFcExtractions:
         bd = oncai_config.inbox_path / "fc_extractions" / "mybatch"
         _write_segment(bd, 1, [_record("R1", "old")])
         (bd / "mybatch.sql").write_text(
-            "CREATE OR REPLACE TABLE extractions_transformed.mybatch AS "
-            "SELECT 1 AS n;"
+            "CREATE OR REPLACE TABLE extractions_transformed.mybatch AS SELECT 1 AS n;"
         )
 
         run_ingest(oncai_config, folder="fc_extractions")
@@ -288,12 +283,8 @@ class TestNextSegment:
 class TestLoadBatchHistory:
     def test_collects_success_hashes_across_segments(self, tmp_path):
         bd = tmp_path / "v1"
-        _write_segment(
-            bd, 1, [_record("R1", "x", src_hash="h1", prompt_hash="p1")]
-        )
-        _write_segment(
-            bd, 2, [_record("R1", "x2", src_hash="h2", prompt_hash="p2")]
-        )
+        _write_segment(bd, 1, [_record("R1", "x", src_hash="h1", prompt_hash="p1")])
+        _write_segment(bd, 2, [_record("R1", "x2", src_hash="h2", prompt_hash="p2")])
         # A failed record contributes nothing to the resume set.
         _write_segment(bd, 3, [_record("R9", "z", success=False)])
 

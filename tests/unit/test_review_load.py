@@ -528,7 +528,9 @@ def test_latest_reviewed_at_wins_regardless_of_line_order(tmp_path: Path) -> Non
     reviews_path.write_text(json.dumps(later) + "\n" + json.dumps(earlier) + "\n")
     _write_raw_jsonl(raw_path, [_raw_record("N1", "source")])
 
-    row = review_to_silver_df(package_path, reviews_path, raw_path).df.row(0, named=True)
+    row = review_to_silver_df(package_path, reviews_path, raw_path).df.row(
+        0, named=True
+    )
     assert row["reviewer"] == "late"
     assert row["diagnosis"] == "FINAL"
 

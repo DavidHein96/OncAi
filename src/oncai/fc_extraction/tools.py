@@ -287,9 +287,7 @@ class ToolRegistry:
         event_dict = obj.model_dump(mode="json")
         summary_exclude = {"comment", "evidence", "note_id", "review_anchor"}
         summary_fields = [
-            field_name
-            for field_name in event_dict
-            if field_name not in summary_exclude
+            field_name for field_name in event_dict if field_name not in summary_exclude
         ]
         summary = {
             field_name: event_dict[field_name]

@@ -77,7 +77,9 @@ class TestCleanPathologyText:
         # Ships with no site-specific patterns, so report content is preserved
         # verbatim — only generic cleaning applies.
         assert PATHOLOGY_BOILERPLATE_PATTERNS == []
-        text = "DIAGNOSIS: Clear cell RCC. Stain quality is acceptable. Margins negative."
+        text = (
+            "DIAGNOSIS: Clear cell RCC. Stain quality is acceptable. Margins negative."
+        )
         result = clean_pathology_text(text)
         assert "Clear cell RCC" in result
         assert "Stain quality is acceptable" in result
@@ -91,7 +93,9 @@ class TestCleanPathologyText:
             "PATHOLOGY_BOILERPLATE_PATTERNS",
             [re.compile(r"Stain quality is acceptable\.")],
         )
-        text = "DIAGNOSIS: Clear cell RCC. Stain quality is acceptable. Margins negative."
+        text = (
+            "DIAGNOSIS: Clear cell RCC. Stain quality is acceptable. Margins negative."
+        )
         result = collate_mod.clean_pathology_text(text)
         assert "Stain quality is acceptable" not in result
         assert "Clear cell RCC" in result

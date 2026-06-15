@@ -1,0 +1,16 @@
+# Prettier runs from this directory (see Makefile `lint`/`format`), so it needs
+# its own ignore list — the repo-root .prettierignore isn't discovered from here.
+# Prettier already skips node_modules; everything below is the Python/build cruft
+# it would otherwise try to format.
+
+# Build & packaging output
+dist/
+build/
+*.spec
+
+# Python virtualenv & tool caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

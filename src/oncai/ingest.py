@@ -604,9 +604,7 @@ def _ingest_fc_adjudications(
         _ensure_sidecars(files)
 
         if not package_files:
-            result.notes.append(
-                f"{round_name}: missing *{ADJUDICATION_PACKAGE_SUFFIX}"
-            )
+            result.notes.append(f"{round_name}: missing *{ADJUDICATION_PACKAGE_SUFFIX}")
             continue
         if not log_files:
             result.notes.append(
@@ -1046,7 +1044,9 @@ def _reconcile_lake_projection(
         names = ", ".join(path.name for path in pruned)
         if target in forgotten_targets:
             # Deliberate: a tombstone forgot this source.
-            result.notes.append(f"{target}: {verb} lake projection — tombstoned ({names})")
+            result.notes.append(
+                f"{target}: {verb} lake projection — tombstoned ({names})"
+            )
         else:
             # No tombstone — the inbox source simply vanished. Could be an
             # intentional local cleanup, but also an accidental delete, so say

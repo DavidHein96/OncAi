@@ -63,9 +63,7 @@ class TestPullInboxFromRemote:
 
         pull_inbox_from_remote(oncai_config, folders=["pathology"])
 
-        assert not (
-            oncai_config.lake_path / "pathology" / "pathology.parquet"
-        ).exists()
+        assert not (oncai_config.lake_path / "pathology" / "pathology.parquet").exists()
 
     def test_idempotent_resync(self, oncai_config):
         remote_inbox = oncai_config.remote_path / "inbox" / "pathology"

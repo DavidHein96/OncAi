@@ -242,9 +242,7 @@ def test_full_pipeline_with_fake_llm(pipeline_env: tuple[Path, OncaiConfig]) -> 
     con = duckdb.connect(str(cfg.db_path), read_only=True)
     try:
         rows = con.execute(
-            "SELECT record_id, events_json "
-            "FROM extractions_raw.v1 "
-            "ORDER BY record_id"
+            "SELECT record_id, events_json FROM extractions_raw.v1 ORDER BY record_id"
         ).fetchall()
     finally:
         con.close()

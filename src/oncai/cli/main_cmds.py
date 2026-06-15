@@ -118,9 +118,7 @@ def _print_ingest_results(results, *, dry_run: bool) -> None:
         for delta in r.deltas:
             # Single-output handlers name the delta after the folder; omit the
             # output name to avoid "pathology / pathology" redundancy.
-            suffix = (
-                "" if delta.output_name == r.folder else f" ({delta.output_name})"
-            )
+            suffix = "" if delta.output_name == r.folder else f" ({delta.output_name})"
             console.print(
                 f"  [magenta]Δ vs lake[/magenta]{suffix}: "
                 f"+{delta.new_rows} new, ~{delta.updated_rows} updated, "
@@ -156,9 +154,7 @@ def _print_inbox_status(inbox_files: dict) -> None:
             )
             if dates:
                 date_range = (
-                    dates[0]
-                    if dates[0] == dates[-1]
-                    else f"{dates[0]} → {dates[-1]}"
+                    dates[0] if dates[0] == dates[-1] else f"{dates[0]} → {dates[-1]}"
                 )
         inbox_table.add_row(folder, mode.value, str(len(files)), date_range)
     console.print(inbox_table)
@@ -252,9 +248,7 @@ def _run_health_checks(config: OncaiConfig) -> None:
         for r in failed:
             if r.severity == "error":
                 errors += 1
-                console.print(
-                    f"  [red]✗[/red] {check_name} [{r.scope}]: {r.message}"
-                )
+                console.print(f"  [red]✗[/red] {check_name} [{r.scope}]: {r.message}")
             else:
                 warnings += 1
                 console.print(
@@ -284,7 +278,9 @@ def _run_health_checks(config: OncaiConfig) -> None:
 def _validate_forget_args(kind: str | None, target: str | None) -> tuple[str, str]:
     if kind is None or target is None:
         supported = ", ".join(sorted(SUPPORTED_TOMBSTONE_KINDS))
-        console.print(f"[red]Kind and target are required. Supported: {supported}[/red]")
+        console.print(
+            f"[red]Kind and target are required. Supported: {supported}[/red]"
+        )
         raise typer.Exit(1)
     if kind not in SUPPORTED_TOMBSTONE_KINDS:
         supported = ", ".join(sorted(SUPPORTED_TOMBSTONE_KINDS))

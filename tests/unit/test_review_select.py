@@ -92,7 +92,9 @@ def test_disagreement_note_ids_uses_explicit_comparable_fields(tmp_path: Path) -
     ) == {"N2", "N3"}
 
 
-def test_disagreement_note_ids_ignores_unselected_primitive_fields(tmp_path: Path) -> None:
+def test_disagreement_note_ids_ignores_unselected_primitive_fields(
+    tmp_path: Path,
+) -> None:
     primary = tmp_path / "primary.jsonl"
     compare = tmp_path / "compare.jsonl"
     _write_jsonl(primary, [_record("N1", {"rec": [{"note_id": "N1", "score": 1}]})])

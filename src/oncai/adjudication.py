@@ -143,7 +143,9 @@ def _comparison_value(
     return {name: fields.get(name) for name in sorted(allowed)}
 
 
-def _comparison_status(left: dict[str, Any] | None, right: dict[str, Any] | None) -> str:
+def _comparison_status(
+    left: dict[str, Any] | None, right: dict[str, Any] | None
+) -> str:
     if left is None:
         return "missing_left"
     if right is None:
@@ -516,18 +518,14 @@ def _adjudicated_fields(
         fields = _side_fields(event, decision)
         if fields is None:
             key = str(event.get("adjudication_key") or event.get("event_key") or "")
-            raise ValueError(
-                f"Adjudication {key!r} chose missing side {decision!r}"
-            )
+            raise ValueError(f"Adjudication {key!r} chose missing side {decision!r}")
         return fields
     fields = record.get("adjudicated_fields")
     if fields is None:
         fields = record.get("fields")
     if not isinstance(fields, dict):
         key = str(event.get("adjudication_key") or event.get("event_key") or "")
-        raise TypeError(
-            f"Custom adjudication {key!r} must include adjudicated_fields"
-        )
+        raise TypeError(f"Custom adjudication {key!r} must include adjudicated_fields")
     return data_fields(dict(fields))
 
 

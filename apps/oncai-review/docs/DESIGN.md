@@ -17,7 +17,8 @@ deliberate, load-bearing constraint, not an aesthetic one:
   text, and nothing to drift or break over time.
 
 The cost is writing a tiny HTTP layer by hand on top of `http.server` instead of
-reaching for a framework. For an app with three endpoints, that is a good trade.
+reaching for a framework. For an app with a handful of endpoints, that is a good
+trade.
 
 ## Local web app instead of a desktop GUI
 
@@ -40,8 +41,9 @@ assets whether run from source or as a frozen binary.
 
 Verdicts are written to a `*.reviews.jsonl` sidecar, one JSON object per save.
 Reviewing is **append-only**: editing a verdict writes a new line rather than
-mutating an old one. On load the log is replayed and the last write per
-`event_key` wins (`ReviewState._load_existing_reviews`). This buys:
+mutating an old one. On load the log is replayed and the last write per record
+key wins (`_record_key` — the `event_key`, or `adjudication_key` in adjudication
+mode; see below). This buys:
 
 - **Crash safety** — a half-written session is just a shorter log; nothing is
   corrupted in place.
@@ -50,6 +52,38 @@ mutating an old one. On load the log is replayed and the last write per
 - **Trivial concurrency** — appends under a lock, no read-modify-write.
 
 Malformed or blank lines are skipped on replay, so a log is never un-loadable.
+
+## Two package shapes, one review surface
+
+The app opens two kinds of immutable package: a `*.review_pkg.json` (one model
+output per event) and a `*.adjudication_pkg.json` (two outputs, `left` and
+`right`, per disputed event, produced by `oncai adjudication create`). Rather
+than fork the server, both flow through the same `ReviewState` and the same
+append-only log. `_package_type` reads the mode the package declares;
+`_record_key` keys each saved record by whichever identifier it carries
+(`adjudication_key` or `event_key`); and the mode only really changes the log
+suffix (`.reviews.jsonl` vs `.adjudications.jsonl`) and which fields a record
+holds. Adjudication decisions (`left` / `right` / `custom` / `exclude`) reuse the
+verdict machinery wholesale — replay, last-write-wins, the lock, and the date
+validation in `_validate_review`, which checks both a review's `edits` and an
+adjudication's `adjudicated_fields`. The front end matches that shape with one
+card renderer per mode sharing the same field controls, evidence highlighting,
+and progress accounting.
+
+The payoff: crash safety, auditability, and authoritative server-side validation
+are written once and hold for both modes, and a future third package shape is a
+renderer plus a key — not a second server.
+
+## Reviewer-added entities live in the log
+
+A reviewer can add an event the model missed. It can't go into the package — that
+file is immutable and shared — so a new entity is written to the append-only
+reviews log like any other record, stamped `is_new_event`. On load,
+`_patients_with_reviewer_added_events` replays those records and grafts the added
+cards onto the matching patient, so they reappear after a refresh or re-open. The
+log stays the single source of truth for everything a reviewer produced —
+verdicts, field edits, and the entities they created — while the package on disk
+is never mutated.
 
 ## Security: path-traversal guard
 
@@ -89,7 +123,9 @@ dependencies beyond `pytest`:
 1. **Pure helpers** — filename safety, date validation, path derivation.
 2. **The verdict log** — replay, last-write-wins, append semantics, validation.
 3. **Live HTTP round-trips** — a real server on an ephemeral port exercises
-   static serving, the path-traversal guard, package load, and review save/reject.
+   static serving, the path-traversal guard, package load (both review and
+   adjudication shapes), review save/reject, reviewer-added events, and
+   unloading a package without deleting its log.
 
 The front end is tested too, without adding a build step or any npm
 dependencies: `app.js` exports its pure helpers under Node (and boots the app in

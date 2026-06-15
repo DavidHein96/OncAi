@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least-privilege default token — no job in this workflow needs write access.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch/PR so pushes don't pile up runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The repo has two independently-tooled halves: the core `oncai` Python package
+# at the repo root, and the review app under apps/oncai-review (its own uv
+# project + npm front-end). Each job mirrors a Makefile target so local
+# `make <target>` and CI run the exact same commands.
+jobs:
+  # ---- Core package (oncai, repo root) --------------------------------------
+  core-lint: # mirrors: make lint-core (+ format / lockfile / CLI guards)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra dev
+      - name: Lockfile in sync with pyproject
+        run: uv lock --check
+      - name: Ruff (lint)
+        run: uv run ruff check src/oncai
+      - name: Ruff (format)
+        run: uv run ruff format --check src/oncai tests
+      - name: Type check (ty)
+        run: uv run ty check src/oncai
+      - name: CLI smoke (entry point + FC registry)
+        run: |
+          uv run oncai --help
+          uv run oncai fc list
+
+  core-test: # mirrors: make test-core
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --extra dev
+      - name: Tests
+        run: uv run pytest tests -q
+
+  # ---- Review app (apps/oncai-review) ---------------------------------------
+  review-lint: # mirrors: make lint-review
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/oncai-review
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - name: Ruff
+        run: uvx ruff check .
+      - name: Type check (ty)
+        run: uv run --group dev ty check .
+      - name: ESLint
+        run: npx eslint .
+      - name: Prettier
+        run: npx prettier --check .
+
+  review-test: # mirrors: make test-review-py
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
+        # The app ships a Windows .exe and has path logic + a path-traversal
+        # guard, so keep one Windows cell as insurance. No need to repeat both
+        # Python versions there — OS path behavior, not the interpreter, is what
+        # differs on Windows.
+        include:
+          - os: windows-latest
+            python-version: "3.11"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/oncai-review
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Tests
+        run: uv run --group dev pytest -q
+
+  review-js: # mirrors: make test-review-js
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/oncai-review
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Front-end tests
+        run: node --test "web/*.test.js"
+
+  # ---- Repo-wide secret scan (mirrors: make secrets) ------------------------
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so gitleaks can scan every commit
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Free for public repos. For an org-owned private repo, add a
+          # GITLEAKS_LICENSE secret (https://gitleaks.io/products.html).

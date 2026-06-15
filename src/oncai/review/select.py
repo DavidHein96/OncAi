@@ -119,21 +119,13 @@ def comparable_fields_from_field_schema(
             continue
         raw_identity_fields = spec.get("event_identity_fields", [])
         identity_fields = (
-            {
-                str(name)
-                for name in raw_identity_fields
-                if str(name).strip()
-            }
+            {str(name) for name in raw_identity_fields if str(name).strip()}
             if isinstance(raw_identity_fields, list)
             else set()
         )
         raw_comparison_fields = spec.get("comparison_fields", [])
         comparison_fields = (
-            {
-                str(name)
-                for name in raw_comparison_fields
-                if str(name).strip()
-            }
+            {str(name) for name in raw_comparison_fields if str(name).strip()}
             if isinstance(raw_comparison_fields, list)
             else set()
         )
@@ -203,9 +195,7 @@ def _normalize_value(value: Any, ignored: set[str], *, keep_strings: bool) -> An
             key_str = str(key)
             if key_str in ignored:
                 continue
-            normalized = _normalize_value(
-                subvalue, ignored, keep_strings=keep_strings
-            )
+            normalized = _normalize_value(subvalue, ignored, keep_strings=keep_strings)
             if normalized is not _IGNORE:
                 out[key_str] = normalized
         return out if out else _IGNORE

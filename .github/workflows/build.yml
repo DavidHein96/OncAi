@@ -15,6 +15,11 @@ on:
   release:
     types: [created]
 
+# Least privilege by default; the build job below re-grants contents: write for
+# the release-asset upload.
+permissions:
+  contents: read
+
 jobs:
   build:
     # Needed so the release-asset upload can write to the release.
@@ -46,6 +51,12 @@ jobs:
             binary: oncai-review # console binary; wrapped into a .app in "Package asset"
             ext: ".zip" # double-clickable .app, zipped for distribution
     runs-on: ${{ matrix.os }}
+    # The app lives in apps/oncai-review; run every step from there so server.py,
+    # web/, assets/, scripts/, and pyproject.toml resolve. (working-directory
+    # only affects `run` steps — the upload-artifact path below is repo-relative.)
+    defaults:
+      run:
+        working-directory: apps/oncai-review
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -68,6 +79,24 @@ jobs:
       - name: Build EXE
         run: pyinstaller --onefile ${{ matrix.iconflag }} --name oncai-review --add-data "${{ matrix.data }}" --add-data "${{ matrix.meta }}" server.py
 
+      - name: Smoke-test the binary
+        shell: bash
+        # Boot the freshly-built binary headless and confirm it actually serves
+        # the bundled web/ (proves --add-data worked) before we ship it. cwd is
+        # the job working-directory (apps/oncai-review), so dist/ is the app's.
+        run: |
+          ./dist/${{ matrix.binary }} --no-browser --port 8765 > server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8765/api/ping && break
+            sleep 1
+          done
+          echo
+          curl -fsS http://127.0.0.1:8765/ | grep -qi "<html" \
+            || { echo "smoke failed — server log:"; cat server.log; kill "$pid" 2>/dev/null; exit 1; }
+          echo "bundled web/ served OK"
+          kill "$pid" 2>/dev/null || true
+
       - name: Package asset
         id: pkg
         shell: bash
@@ -89,7 +118,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: oncai-review-${{ steps.ver.outputs.version }}-${{ matrix.label }}
-          path: ${{ steps.pkg.outputs.asset }}
+          # path is relative to the repo root, not the job working-directory.
+          path: apps/oncai-review/${{ steps.pkg.outputs.asset }}
 
       - name: Attach binary to the release
         if: github.event_name == 'release'

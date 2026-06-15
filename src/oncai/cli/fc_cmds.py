@@ -183,7 +183,9 @@ def _validate_batch_args(
     if not _SAFE_BATCH_NAME.match(batch):
         _bail(f"--batch must be alphanumeric+underscore (got {batch!r})")
     if (reextract_on_prompt_change or force_rerun) and jsonl:
-        _bail("--reextract-on-prompt-change / --force-rerun require --source (not --jsonl)")
+        _bail(
+            "--reextract-on-prompt-change / --force-rerun require --source (not --jsonl)"
+        )
     if (reextract_on_prompt_change or force_rerun) and full:
         _bail("--reextract-on-prompt-change / --force-rerun don't apply with --full")
     return batch
@@ -736,8 +738,7 @@ def _prelog_run(
         git_info = _get_git_info()
         tool_names = [t for t in registry.list_tools() if t not in _BUILTIN_TOOLS]
         tool_schemas = {
-            t: registry.get(t).model.model_json_schema()
-            for t in tool_names
+            t: registry.get(t).model.model_json_schema() for t in tool_names
         }
         resolved_model = getattr(fc_client, "model", None) or getattr(
             fc_client, "deployment", None
@@ -836,7 +837,9 @@ def _build_review_package_for_run(
             only_flagged=scope == "flagged",
         )
     except Exception as e:
-        console.print(f"  [yellow]Warning: failed to build review package: {e}[/yellow]")
+        console.print(
+            f"  [yellow]Warning: failed to build review package: {e}[/yellow]"
+        )
     else:
         console.print(f"  Review package: {pkg_path}")
         console.print(

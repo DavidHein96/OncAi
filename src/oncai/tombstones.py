@@ -260,7 +260,9 @@ def prune_lake_target(
     config: OncaiConfig, kind: str, target: str, *, dry_run: bool = False
 ) -> list[Path]:
     """Remove local lake projection files for a tombstoned source."""
-    removed = [path for path in lake_paths_for_target(config, kind, target) if path.exists()]
+    removed = [
+        path for path in lake_paths_for_target(config, kind, target) if path.exists()
+    ]
     if dry_run:
         return removed
     for path in removed:
